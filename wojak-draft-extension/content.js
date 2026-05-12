@@ -1,4 +1,6 @@
 const AUTO_LIKE_INTERVAL_MS = 3000;
+const TARGET_LOAD_TIMEOUT_MS = 5000;
+const MAX_TARGET_REFRESH_COUNT = 3;
 const SHORT_WAIT_MS = 500;
 const UPLOAD_WAIT_MS = 15000;
 
@@ -10,10 +12,35 @@ let isTicking = false;
 
 function sendMessage(message) {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage(message, (response) => {
-      resolve(response || { ok: false, error: chrome.runtime.lastError?.message });
-    });
+    try {
+      if (!chrome.runtime?.id) {
+        resolve({ ok: false, error: "Extension context invalidated" });
+        return;
+      }
+
+      chrome.runtime.sendMessage(message, (response) => {
+        resolve(response || { ok: false, error: chrome.runtime.lastError?.message });
+      });
+    } catch (error) {
+      resolve({ ok: false, error: error.message });
+    }
   });
+}
+
+async function sendRequiredMessage(message) {
+  const response = await sendMessage(message);
+  if (response.ok) {
+    return response;
+  }
+
+  if (/Extension context invalidated/i.test(response.error || "")) {
+    // 扩展重载后旧 content script 不能继续通信，停止当前页面上的轮询。
+    window.clearInterval(autoLikeTimer);
+    autoLikeTimer = null;
+    autoLikeTask = null;
+  }
+
+  return response;
 }
 
 function statusIdFromUrl(url) {
@@ -171,7 +198,7 @@ function isPostOpen(task) {
 }
 
 async function reportState(patch) {
-  await sendMessage({
+  await sendRequiredMessage({
     type: "UPDATE_AUTO_LIKE_TASK",
     patch
   });
@@ -475,17 +502,12 @@ function findReplyButton(root) {
   const buttons = Array.from(root.querySelectorAll("button"));
   const scopedButton = buttons.find((button) => {
     const label = button.getAttribute("aria-label") || button.textContent || "";
-    return /reply|回复/i.test(label);
+    return /^(Reply|回复|Post|发布|发送)$/i.test(normalizeText(label));
   });
   if (scopedButton) {
     return scopedButton;
   }
-
-  const visibleButtons = Array.from(document.querySelectorAll("button")).filter(isVisible);
-  return visibleButtons.find((button) => {
-    const label = button.getAttribute("aria-label") || button.textContent || "";
-    return /reply|回复/i.test(label);
-  }) || null;
+  return null;
 }
 
 function normalizeText(text) {
@@ -541,7 +563,7 @@ function hasExistingReply(commentText) {
 }
 
 async function waitForEnabledButton(root) {
-  const deadline = Date.now() + UPLOAD_WAIT_MS;
+  const deadline = Date.now() + UPLOAD_WAIT_MS + 10000;
   let button = findReplyButton(root);
 
   while ((!button || button.disabled || button.getAttribute("aria-disabled") === "true") && Date.now() < deadline) {
@@ -706,10 +728,19 @@ async function publishReply(task) {
   }
   const button = await waitForEnabledButton(finalRoot);
   button.click();
-  await delay(10000);
+  await delay(3000);
   const replyUrl = await waitForCondition(() => {
     return findReplyUrl(task.commentText, beforeStatusIds, task.statusId);
-  }, 15000, 500);
+  }, 25000, 500);
+  if (!replyUrl && hasExistingReply(task.commentText)) {
+    await stopTask({
+      state: "replied",
+      completedAt: Date.now(),
+      replyUrl: "",
+      commentedUrl: ""
+    });
+    return;
+  }
   await stopTask({
     state: "replied",
     completedAt: Date.now(),
@@ -720,15 +751,34 @@ async function publishReply(task) {
 
 async function refreshIfNeeded(task) {
   const now = Date.now();
-  if (now - scriptStartedAt < AUTO_LIKE_INTERVAL_MS || now - lastReloadAt < AUTO_LIKE_INTERVAL_MS) {
+  if (now - scriptStartedAt < TARGET_LOAD_TIMEOUT_MS || now - lastReloadAt < TARGET_LOAD_TIMEOUT_MS) {
     return;
   }
+
+  const targetRefreshCount = Number(task.targetRefreshCount) || 0;
+  if (targetRefreshCount >= MAX_TARGET_REFRESH_COUNT) {
+    await stopTask({
+      state: "error",
+      error: "目标帖子 5 秒内加载失败，刷新 3 次后仍未就绪",
+      completedAt: Date.now()
+    });
+    return;
+  }
+
+  const nextRefreshCount = targetRefreshCount + 1;
   lastReloadAt = now;
 
+  // 页面刷新后 content script 会重置，刷新次数需要写回任务状态。
   await reportState({
     state: "refreshing",
-    reason: isTargetUrl(task) ? "post_not_ready" : "wrong_url"
+    reason: isTargetUrl(task) ? "post_not_ready" : "wrong_url",
+    targetRefreshCount: nextRefreshCount
   });
+  autoLikeTask = {
+    ...task,
+    state: "refreshing",
+    targetRefreshCount: nextRefreshCount
+  };
 
   if (!isTargetUrl(task)) {
     location.assign(task.targetUrl);
@@ -799,7 +849,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 (async () => {
-  const response = await sendMessage({ type: "GET_AUTO_LIKE_TASK" });
+  const response = await sendRequiredMessage({ type: "GET_AUTO_LIKE_TASK" });
   if (response.ok && response.task) {
     await startAutoLike(response.task);
   }

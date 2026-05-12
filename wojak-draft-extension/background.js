@@ -4,6 +4,9 @@ const REMOTE_POLL_ALARM = "remoteTaskPoll";
 const LAST_TARGET_ACTION_AT_KEY = "remoteTaskMonitorLastTargetActionAt";
 const LAST_IDLE_ACTION_AT_KEY = "remoteTaskMonitorLastIdleActionAt";
 const MONITOR_STATUS_KEY = "remoteTaskMonitorStatus";
+const MONITOR_WINDOW_ID_KEY = "remoteTaskMonitorWindowId";
+const WINDOW_MONITOR_MAP_KEY = "remoteTaskMonitorWindowConfigMap";
+const DEFAULT_QUEUE_ID = "default";
 const ACTION_INTERVAL_MS = 2 * 60 * 1000;
 const ACTION_INTERVAL_MINUTES = 2;
 const POLL_INTERVAL_MS = 30 * 1000;
@@ -90,6 +93,10 @@ function getStatusId(url) {
   return match ? match[1] : "";
 }
 
+function actionStorageKey(baseKey, queueId) {
+  return `${baseKey}:${queueId || DEFAULT_QUEUE_ID}`;
+}
+
 async function getTasks() {
   const stored = await chrome.storage.local.get(TASKS_KEY);
   return stored[TASKS_KEY] || {};
@@ -104,8 +111,43 @@ async function getRemoteConfig() {
   return {
     enabled: false,
     apiBaseUrl: "",
+    queueId: DEFAULT_QUEUE_ID,
     pollMinutes: ACTION_INTERVAL_MINUTES,
     ...(stored[REMOTE_CONFIG_KEY] || {})
+  };
+}
+
+async function getWindowMonitorMap() {
+  const stored = await chrome.storage.local.get(WINDOW_MONITOR_MAP_KEY);
+  return stored[WINDOW_MONITOR_MAP_KEY] || {};
+}
+
+async function setWindowMonitorConfig(windowId, patch) {
+  if (!Number.isInteger(windowId)) {
+    return;
+  }
+  const monitorMap = await getWindowMonitorMap();
+  monitorMap[String(windowId)] = {
+    ...(monitorMap[String(windowId)] || {}),
+    ...patch,
+    updatedAt: Date.now()
+  };
+  await chrome.storage.local.set({ [WINDOW_MONITOR_MAP_KEY]: monitorMap });
+}
+
+async function hasEnabledMonitorWindow() {
+  const monitorMap = await getWindowMonitorMap();
+  return Object.values(monitorMap).some((item) => item?.enabled);
+}
+
+async function getRemoteConfigForWindow(windowId = null) {
+  const config = await getRemoteConfig();
+  const monitorMap = await getWindowMonitorMap();
+  const windowConfig = Number.isInteger(windowId) ? monitorMap[String(windowId)] || {} : {};
+  return {
+    ...config,
+    enabled: Object.prototype.hasOwnProperty.call(windowConfig, "enabled") ? Boolean(windowConfig.enabled) : Boolean(config.enabled),
+    queueId: windowConfig.queueId || DEFAULT_QUEUE_ID
   };
 }
 
@@ -113,15 +155,23 @@ async function setRemoteConfig(config) {
   const nextConfig = {
     enabled: Boolean(config.enabled),
     apiBaseUrl: String(config.apiBaseUrl || "").trim().replace(/\/+$/, ""),
+    queueId: String(config.queueId || DEFAULT_QUEUE_ID),
     pollMinutes: ACTION_INTERVAL_MINUTES
   };
   await chrome.storage.local.set({ [REMOTE_CONFIG_KEY]: nextConfig });
+  if (Number.isInteger(config.windowId)) {
+    await chrome.storage.local.set({ [MONITOR_WINDOW_ID_KEY]: config.windowId });
+    await setWindowMonitorConfig(config.windowId, {
+      enabled: nextConfig.enabled,
+      queueId: nextConfig.queueId
+    });
+  }
   if (nextConfig.enabled) {
-    await chrome.storage.local.remove(LAST_TARGET_ACTION_AT_KEY);
+    await chrome.storage.local.remove(actionStorageKey(LAST_TARGET_ACTION_AT_KEY, nextConfig.queueId));
   }
   await scheduleRemotePoll(nextConfig);
   if (nextConfig.enabled && nextConfig.apiBaseUrl) {
-    checkRemoteTasks().catch((error) => {
+    checkRemoteTasks({ windowId: config.windowId }).catch((error) => {
       chrome.storage.local.set({
         remoteTaskMonitorLastError: error.message,
         remoteTaskMonitorLastErrorAt: Date.now()
@@ -134,7 +184,7 @@ async function setRemoteConfig(config) {
 async function scheduleRemotePoll(config = null) {
   const nextConfig = config || await getRemoteConfig();
   await chrome.alarms.clear(REMOTE_POLL_ALARM);
-  if (!nextConfig.enabled || !nextConfig.apiBaseUrl) {
+  if ((!nextConfig.enabled && !await hasEnabledMonitorWindow()) || !nextConfig.apiBaseUrl) {
     await setMonitorStatus({ state: "silent", message: "当前处于静默状态" });
     return;
   }
@@ -188,13 +238,59 @@ async function canStartAction(key) {
   return Date.now() - lastActionAt >= ACTION_INTERVAL_MS;
 }
 
-async function hasRunningTask() {
+async function hasRunningTask(queueId = null) {
   const tasks = await getTasks();
-  return Object.values(tasks).some((task) => task && !TERMINAL_STATES.has(task.state));
+  return Object.values(tasks).some((task) => {
+    if (!task || TERMINAL_STATES.has(task.state)) {
+      return false;
+    }
+    return !queueId || task.queueId === queueId;
+  });
 }
 
-async function getOrCreateXTab() {
-  const tabs = await chrome.tabs.query({ url: ["https://x.com/*"] });
+async function getStoredMonitorWindowId() {
+  const stored = await chrome.storage.local.get(MONITOR_WINDOW_ID_KEY);
+  const windowId = Number(stored[MONITOR_WINDOW_ID_KEY]);
+  return Number.isInteger(windowId) ? windowId : null;
+}
+
+async function resolveMonitorWindowId(windowId = null) {
+  if (Number.isInteger(windowId)) {
+    try {
+      await chrome.windows.get(windowId);
+      return windowId;
+    } catch {
+      const monitorMap = await getWindowMonitorMap();
+      delete monitorMap[String(windowId)];
+      await chrome.storage.local.set({ [WINDOW_MONITOR_MAP_KEY]: monitorMap });
+      return null;
+    }
+  }
+
+  const storedWindowId = await getStoredMonitorWindowId();
+  if (Number.isInteger(storedWindowId)) {
+    try {
+      await chrome.windows.get(storedWindowId);
+      return storedWindowId;
+    } catch {
+      await chrome.storage.local.remove(MONITOR_WINDOW_ID_KEY);
+    }
+  }
+
+  try {
+    const window = await chrome.windows.getLastFocused();
+    return Number.isInteger(window?.id) ? window.id : null;
+  } catch {
+    return null;
+  }
+}
+
+async function getOrCreateXTab(windowId = null) {
+  const monitorWindowId = await resolveMonitorWindowId(windowId);
+  const query = monitorWindowId
+    ? { url: ["https://x.com/*"], windowId: monitorWindowId }
+    : { url: ["https://x.com/*"] };
+  const tabs = await chrome.tabs.query(query);
   const homeTab = tabs.find((tab) => tab.url === HOME_URL);
   if (homeTab?.id) {
     return homeTab;
@@ -202,7 +298,11 @@ async function getOrCreateXTab() {
   if (tabs[0]?.id) {
     return tabs[0];
   }
-  return chrome.tabs.create({ url: HOME_URL, active: true });
+  return chrome.tabs.create({
+    url: HOME_URL,
+    active: true,
+    ...(monitorWindowId ? { windowId: monitorWindowId } : {})
+  });
 }
 
 function delay(ms) {
@@ -253,8 +353,8 @@ function waitForTabComplete(tabId, timeoutMs = 15000) {
   });
 }
 
-async function browseHome({ shouldLike }) {
-  const tab = await getOrCreateXTab();
+async function browseHome({ shouldLike, windowId, queueId }) {
+  const tab = await getOrCreateXTab(windowId);
   const shouldOpenHome = tab.url !== HOME_URL;
   if (shouldOpenHome) {
     await chrome.tabs.update(tab.id, { url: HOME_URL, active: true });
@@ -262,15 +362,19 @@ async function browseHome({ shouldLike }) {
     await delay(1500);
   } else {
     await chrome.tabs.update(tab.id, { active: true });
+    if (tab.status !== "complete") {
+      await waitForTabComplete(tab.id);
+      await delay(1500);
+    }
   }
 
-  if (shouldLike) {
-    await markActionStarted(LAST_IDLE_ACTION_AT_KEY);
-  }
   const response = await sendTabMessageWithRetry(tab.id, {
     type: "BROWSE_HOME",
     shouldLike
   });
+  if (shouldLike && response.ok) {
+    await markActionStarted(actionStorageKey(LAST_IDLE_ACTION_AT_KEY, queueId));
+  }
   await chrome.storage.local.set({
     remoteTaskMonitorLastIdleAt: Date.now(),
     remoteTaskMonitorLastIdleResult: response
@@ -290,6 +394,7 @@ function normalizeRemoteTask(remoteTask) {
   const imageAssetPath = remoteTask.imageAssetPath || pick(imageAssetPaths);
   return {
     remoteTaskId: String(remoteTask.id || ""),
+    queueId: String(remoteTask.queueId || DEFAULT_QUEUE_ID),
     targetUrl: remoteTask.targetUrl || remoteTask.url || "",
     commentText: ensureKeyword(remoteTask.commentText || polish(pick(defaultComments))),
     imageAssetPath,
@@ -299,6 +404,7 @@ function normalizeRemoteTask(remoteTask) {
 
 async function fetchRemoteTask(config) {
   const url = new URL(remoteUrl(config, "/api/wojak/tasks/next"));
+  url.searchParams.set("queueId", config.queueId || DEFAULT_QUEUE_ID);
 
   const response = await fetch(url.toString(), {
     method: "GET",
@@ -313,7 +419,9 @@ async function fetchRemoteTask(config) {
 }
 
 async function hasPendingRemoteTask(config) {
-  const response = await fetch(remoteUrl(config, "/api/wojak/tasks"), {
+  const url = new URL(remoteUrl(config, "/api/wojak/tasks"));
+  url.searchParams.set("queueId", config.queueId || DEFAULT_QUEUE_ID);
+  const response = await fetch(url.toString(), {
     method: "GET",
     headers: remoteHeaders(config)
   });
@@ -349,10 +457,21 @@ async function reportRemoteResult(task) {
   });
 }
 
-async function checkRemoteTasks() {
-  const config = await getRemoteConfig();
+async function checkRemoteTasks(options = {}) {
+  if (Number.isInteger(options.windowId)) {
+    try {
+      await chrome.windows.get(options.windowId);
+    } catch {
+      const monitorMap = await getWindowMonitorMap();
+      delete monitorMap[String(options.windowId)];
+      await chrome.storage.local.set({ [WINDOW_MONITOR_MAP_KEY]: monitorMap });
+      return { started: false, reason: "window_closed", nextCheckAt: Date.now() + POLL_INTERVAL_MS };
+    }
+  }
+
+  const config = await getRemoteConfigForWindow(options.windowId);
   const nextCheckAt = Date.now() + POLL_INTERVAL_MS;
-  if (!config.enabled || !config.apiBaseUrl || await hasRunningTask()) {
+  if (!config.enabled || !config.apiBaseUrl || await hasRunningTask(config.queueId)) {
     const result = { started: false, reason: "not_ready", nextCheckAt };
     await setMonitorStatus({
       state: "watching",
@@ -364,8 +483,9 @@ async function checkRemoteTasks() {
 
   const hasPendingTask = await hasPendingRemoteTask(config);
   if (!hasPendingTask) {
-    if (!await canStartAction(LAST_IDLE_ACTION_AT_KEY)) {
-      const idleResult = await browseHome({ shouldLike: false });
+    const idleActionKey = actionStorageKey(LAST_IDLE_ACTION_AT_KEY, config.queueId);
+    if (!await canStartAction(idleActionKey)) {
+      const idleResult = await browseHome({ shouldLike: false, windowId: options.windowId, queueId: config.queueId });
       const result = { started: false, reason: "idle_scrolled", idleResult, nextCheckAt };
       await setMonitorStatus({
         state: "idle_scrolled",
@@ -375,7 +495,7 @@ async function checkRemoteTasks() {
       return result;
     }
 
-    const idleResult = await browseHome({ shouldLike: true });
+    const idleResult = await browseHome({ shouldLike: true, windowId: options.windowId, queueId: config.queueId });
     const result = { started: false, idle: true, idleResult, nextCheckAt };
     await setMonitorStatus({
       state: "idle_liked",
@@ -385,8 +505,9 @@ async function checkRemoteTasks() {
     return result;
   }
 
-  if (!await canStartAction(LAST_TARGET_ACTION_AT_KEY)) {
-    const waitMs = await getActionWaitMs(LAST_TARGET_ACTION_AT_KEY);
+  const targetActionKey = actionStorageKey(LAST_TARGET_ACTION_AT_KEY, config.queueId);
+  if (!await canStartAction(targetActionKey)) {
+    const waitMs = await getActionWaitMs(targetActionKey);
     const result = { started: false, reason: "waiting_target_interval", waitMs, nextCheckAt };
     await setMonitorStatus({
       state: "waiting_target_interval",
@@ -399,7 +520,7 @@ async function checkRemoteTasks() {
 
   const remoteTask = await fetchRemoteTask(config);
   if (!remoteTask) {
-    const idleResult = await browseHome({ shouldLike: false });
+    const idleResult = await browseHome({ shouldLike: false, windowId: options.windowId, queueId: config.queueId });
     const result = { started: false, reason: "idle_scrolled", idleResult, nextCheckAt };
     await setMonitorStatus({
       state: "idle_scrolled",
@@ -414,8 +535,8 @@ async function checkRemoteTasks() {
     throw new Error("Remote task must include id and targetUrl");
   }
 
-  const tab = await getOrCreateXTab();
-  await markActionStarted(LAST_TARGET_ACTION_AT_KEY);
+  const tab = await getOrCreateXTab(options.windowId);
+  await markActionStarted(targetActionKey);
   const startedTask = await startAutoLike({
     tabId: tab.id,
     ...task,
@@ -430,7 +551,7 @@ async function checkRemoteTasks() {
   return result;
 }
 
-async function startAutoLike({ tabId, targetUrl, commentText, imageAssetPath, imageFileName, remoteTaskId, source }) {
+async function startAutoLike({ tabId, targetUrl, commentText, imageAssetPath, imageFileName, remoteTaskId, queueId, source }) {
   if (!tabId || !targetUrl) {
     throw new Error("Missing tabId or targetUrl");
   }
@@ -449,6 +570,7 @@ async function startAutoLike({ tabId, targetUrl, commentText, imageAssetPath, im
     imageAssetPath: imageAssetPath || "",
     imageFileName: imageFileName || "",
     remoteTaskId: remoteTaskId || "",
+    queueId: queueId || DEFAULT_QUEUE_ID,
     source: source || "manual",
     startedAt: Date.now(),
     state: "opening"
@@ -487,19 +609,22 @@ async function updateTaskState(tabId, patch) {
   await setTasks(tasks);
 
   if (TERMINAL_STATES.has(nextTask.state) && nextTask.remoteTaskId && !nextTask.resultReported) {
-    tasks[key] = {
+    const reportedTask = {
       ...nextTask,
       resultReported: true
     };
+    tasks[key] = reportedTask;
     await setTasks(tasks);
     try {
-      await reportRemoteResult(tasks[key]);
+      await reportRemoteResult(reportedTask);
     } catch (error) {
       await chrome.storage.local.set({
         remoteTaskMonitorLastError: error.message,
         remoteTaskMonitorLastErrorAt: Date.now()
       });
     }
+    delete tasks[key];
+    await setTasks(tasks);
     await chrome.tabs.update(Number(tabId), { url: HOME_URL, active: true });
   }
 }
@@ -536,7 +661,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message?.type === "GET_REMOTE_MONITOR_CONFIG") {
-      sendResponse({ ok: true, config: await getRemoteConfig() });
+      sendResponse({ ok: true, config: await getRemoteConfigForWindow(message.windowId) });
       return;
     }
 
@@ -551,7 +676,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     if (message?.type === "CHECK_REMOTE_TASKS") {
-      sendResponse({ ok: true, result: await checkRemoteTasks() });
+      sendResponse({ ok: true, result: await checkRemoteTasks({ windowId: message.windowId }) });
     }
   })().catch((error) => {
     sendResponse({ ok: false, error: error.message });
@@ -568,12 +693,25 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     return;
   }
 
-  checkRemoteTasks().catch((error) => {
+  pollEnabledWindows().catch((error) => {
     chrome.storage.local.set({
       remoteTaskMonitorLastError: error.message,
       remoteTaskMonitorLastErrorAt: Date.now()
     });
   });
 });
+
+async function pollEnabledWindows() {
+  const monitorMap = await getWindowMonitorMap();
+  const entries = Object.entries(monitorMap).filter(([, config]) => config?.enabled);
+  if (!entries.length) {
+    await checkRemoteTasks();
+    return;
+  }
+
+  for (const [windowId] of entries) {
+    await checkRemoteTasks({ windowId: Number(windowId) });
+  }
+}
 
 scheduleRemotePoll();

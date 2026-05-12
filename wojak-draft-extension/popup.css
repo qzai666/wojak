@@ -42,6 +42,7 @@ label {
 }
 
 input,
+select,
 button {
   min-height: 36px;
   border: 1px solid #d6dbe1;
@@ -49,7 +50,8 @@ button {
   font: inherit;
 }
 
-input {
+input,
+select {
   width: 100%;
   padding: 0 9px;
   background: #fff;

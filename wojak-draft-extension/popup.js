@@ -1,7 +1,10 @@
 let remoteConfig = {
   enabled: false,
-  apiBaseUrl: ""
+  apiBaseUrl: "",
+  queueId: "default"
 };
+
+let queues = [{ id: "default", name: "默认队列" }];
 
 const $ = (id) => document.getElementById(id);
 
@@ -25,6 +28,39 @@ function setMonitorStatus(text, stateName = "") {
 
 function formatSeconds(ms) {
   return `${Math.max(0, Math.ceil(Number(ms || 0) / 1000))} 秒`;
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function renderQueues() {
+  const selectedQueueId = remoteConfig.queueId || "default";
+  $("queueId").innerHTML = queues.map((queue) => {
+    const stateText = queue.enabled === false ? "（已关闭）" : "（已启动）";
+    return `<option value="${escapeHtml(queue.id)}">${escapeHtml(queue.name)}${stateText}</option>`;
+  }).join("");
+  $("queueId").value = queues.some((queue) => queue.id === selectedQueueId) ? selectedQueueId : queues[0]?.id || "default";
+}
+
+async function refreshQueues() {
+  const apiBaseUrl = $("remoteApiBaseUrl").value.trim().replace(/\/+$/, "") || remoteConfig.apiBaseUrl || "http://127.0.0.1:8787";
+  try {
+    const response = await fetch(`${apiBaseUrl}/api/wojak/queues`);
+    if (!response.ok) {
+      throw new Error(`队列读取失败：${response.status}`);
+    }
+    const payload = await response.json();
+    queues = payload.queues?.length ? payload.queues : queues;
+  } catch {
+    queues = queues.length ? queues : [{ id: "default", name: "默认队列" }];
+  }
+  renderQueues();
 }
 
 function renderListenState() {
@@ -89,7 +125,11 @@ async function refreshAutoLikeStatus() {
 }
 
 async function refreshRemoteConfig() {
-  const response = await chrome.runtime.sendMessage({ type: "GET_REMOTE_MONITOR_CONFIG" });
+  const window = await chrome.windows.getCurrent();
+  const response = await chrome.runtime.sendMessage({
+    type: "GET_REMOTE_MONITOR_CONFIG",
+    windowId: window.id
+  });
   if (!response?.ok) {
     setRemoteStatus(response?.error || "监听配置读取失败", "error");
     return;
@@ -97,9 +137,11 @@ async function refreshRemoteConfig() {
 
   remoteConfig = {
     enabled: Boolean(response.config?.enabled),
-    apiBaseUrl: response.config?.apiBaseUrl || "http://127.0.0.1:8787"
+    apiBaseUrl: response.config?.apiBaseUrl || "http://127.0.0.1:8787",
+    queueId: response.config?.queueId || "default"
   };
   $("remoteApiBaseUrl").value = remoteConfig.apiBaseUrl;
+  await refreshQueues();
   renderListenState();
   if (remoteConfig.enabled) {
     await checkRemoteTasks();
@@ -107,7 +149,11 @@ async function refreshRemoteConfig() {
 }
 
 async function checkRemoteTasks() {
-  const response = await chrome.runtime.sendMessage({ type: "CHECK_REMOTE_TASKS" });
+  const window = await chrome.windows.getCurrent();
+  const response = await chrome.runtime.sendMessage({
+    type: "CHECK_REMOTE_TASKS",
+    windowId: window.id
+  });
   if (!response?.ok) {
     setRemoteStatus(response?.error || "任务检查失败", "error");
     return;
@@ -164,6 +210,8 @@ async function refreshMonitorStatus() {
 async function toggleListening() {
   const nextEnabled = !remoteConfig.enabled;
   const apiBaseUrl = $("remoteApiBaseUrl").value.trim();
+  const queueId = $("queueId").value;
+  const window = await chrome.windows.getCurrent();
 
   if (nextEnabled && !apiBaseUrl) {
     setRemoteStatus("请先填写前端服务地址", "error");
@@ -174,7 +222,9 @@ async function toggleListening() {
     type: "UPDATE_REMOTE_MONITOR_CONFIG",
     config: {
       enabled: nextEnabled,
-      apiBaseUrl
+      apiBaseUrl,
+      queueId,
+      windowId: window.id
     }
   });
 
@@ -185,14 +235,50 @@ async function toggleListening() {
 
   remoteConfig = {
     enabled: Boolean(response.config?.enabled),
-    apiBaseUrl: response.config?.apiBaseUrl || apiBaseUrl
+    apiBaseUrl: response.config?.apiBaseUrl || apiBaseUrl,
+    queueId: response.config?.queueId || queueId
   };
   renderListenState();
   await refreshMonitorStatus();
 }
 
+async function updateQueueBinding() {
+  if (!remoteConfig.enabled) {
+    remoteConfig.queueId = $("queueId").value;
+    return;
+  }
+
+  const window = await chrome.windows.getCurrent();
+  const apiBaseUrl = $("remoteApiBaseUrl").value.trim();
+  const queueId = $("queueId").value;
+  const response = await chrome.runtime.sendMessage({
+    type: "UPDATE_REMOTE_MONITOR_CONFIG",
+    config: {
+      enabled: true,
+      apiBaseUrl,
+      queueId,
+      windowId: window.id
+    }
+  });
+
+  if (!response?.ok) {
+    setRemoteStatus(response?.error || "窗口队列更新失败", "error");
+    return;
+  }
+
+  remoteConfig = {
+    enabled: true,
+    apiBaseUrl: response.config?.apiBaseUrl || apiBaseUrl,
+    queueId: response.config?.queueId || queueId
+  };
+  renderQueues();
+  await refreshMonitorStatus();
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   $("listenBtn").addEventListener("click", toggleListening);
+  $("queueId").addEventListener("change", updateQueueBinding);
+  $("remoteApiBaseUrl").addEventListener("change", refreshQueues);
   await refreshRemoteConfig();
   await refreshAutoLikeStatus();
   await refreshMonitorStatus();

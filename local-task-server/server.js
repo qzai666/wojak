@@ -7,7 +7,9 @@ const PORT = Number(process.env.PORT || 8787);
 
 const tasks = [];
 const results = [];
+const queues = [{ id: "default", name: "默认队列", enabled: true }];
 const COMMENTS_PATH = path.resolve(__dirname, "../comments.json");
+const DEFAULT_QUEUE_ID = queues[0].id;
 
 function sendHtml(response, html) {
   response.writeHead(200, {
@@ -46,9 +48,28 @@ function readJson(request) {
   });
 }
 
+function normalizeQueueId(value) {
+  const queueId = String(value || DEFAULT_QUEUE_ID).trim();
+  return queues.some((queue) => queue.id === queueId) ? queueId : DEFAULT_QUEUE_ID;
+}
+
+function queueLabel(queueId) {
+  return queues.find((queue) => queue.id === queueId)?.name || queueId;
+}
+
+function createQueue(payload) {
+  const name = String(payload.name || "").trim();
+  return {
+    id: crypto.randomUUID(),
+    name: name || `队列 ${queues.length + 1}`,
+    enabled: true
+  };
+}
+
 function createTask(payload) {
   return {
     id: crypto.randomUUID(),
+    queueId: normalizeQueueId(payload.queueId),
     targetUrl: String(payload.targetUrl || payload.url || "").trim(),
     commentText: String(payload.commentText || "").trim(),
     imageAssetPath: String(payload.imageAssetPath || "").trim(),
@@ -131,6 +152,7 @@ function renderHomePage() {
       }
 
       input,
+      select,
       button {
         min-height: 40px;
         border: 1px solid #2c3545;
@@ -138,7 +160,8 @@ function renderHomePage() {
         font: inherit;
       }
 
-      input {
+      input,
+      select {
         width: 100%;
         padding: 0 12px;
         color: #f4f7fb;
@@ -196,6 +219,52 @@ function renderHomePage() {
         margin: 0;
         font-size: 16px;
         font-weight: 700;
+      }
+
+      .table-actions {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .queue-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 12px;
+      }
+
+      .queue-tab {
+        min-height: 34px;
+        color: #d9e2ef;
+        background: #171d28;
+      }
+
+      .queue-tab.active {
+        color: #f8fafc;
+        background: #2563eb;
+      }
+
+      .queue-tab.off {
+        color: #fca5a5;
+      }
+
+      .queue-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .queue-state {
+        min-width: 72px;
+        color: #86efac;
+        font-weight: 700;
+      }
+
+      .queue-state.off {
+        color: #fb7185;
       }
 
       .count {
@@ -302,23 +371,37 @@ function renderHomePage() {
       <header>
         <div>
           <h1>Wojak Task Console</h1>
-          <p class="subtitle">输入链接加入队列，扩展会按顺序执行一键三连。</p>
+          <p class="subtitle">输入链接后会加入所有队列，已启动的队列会按顺序执行。</p>
         </div>
         <button id="refreshBtn" class="secondary" type="button">刷新任务</button>
       </header>
 
       <section class="input-panel">
         <form id="taskForm">
-          <input id="targetUrl" name="targetUrl" type="url" placeholder="X 帖子链接，回车加入队列" required>
-          <button type="submit">加入队列</button>
+          <input id="targetUrl" name="targetUrl" type="url" placeholder="X 帖子链接，回车加入所有队列" required>
+          <button type="submit">加入所有队列</button>
         </form>
         <p id="status" class="status"></p>
+      </section>
+
+      <section class="input-panel">
+        <div id="queueTabs" class="queue-tabs"></div>
+        <div class="queue-toolbar">
+          <span id="queueState" class="queue-state">已启动</span>
+          <button id="toggleQueueBtn" class="secondary" type="button">关闭</button>
+          <button id="addQueueBtn" class="secondary" type="button">新增队列</button>
+          <button id="renameQueueBtn" class="secondary" type="button">重命名</button>
+          <button id="deleteQueueBtn" class="secondary" type="button">删除队列</button>
+        </div>
       </section>
 
       <section class="table-panel">
         <div class="table-header">
           <h2 class="table-title">任务队列</h2>
-          <span id="taskCount" class="count">共 0 条</span>
+          <div class="table-actions">
+            <span id="taskCount" class="count">共 0 条</span>
+            <button id="clearTasksBtn" class="secondary" type="button">清除日志</button>
+          </div>
         </div>
         <div id="taskList" class="table-wrap"></div>
       </section>
@@ -329,6 +412,15 @@ function renderHomePage() {
       const status = document.getElementById("status");
       const taskList = document.getElementById("taskList");
       const taskCount = document.getElementById("taskCount");
+      const clearTasksBtn = document.getElementById("clearTasksBtn");
+      const queueTabs = document.getElementById("queueTabs");
+      const queueState = document.getElementById("queueState");
+      const toggleQueueBtn = document.getElementById("toggleQueueBtn");
+      const addQueueBtn = document.getElementById("addQueueBtn");
+      const renameQueueBtn = document.getElementById("renameQueueBtn");
+      const deleteQueueBtn = document.getElementById("deleteQueueBtn");
+      let queues = [];
+      let activeQueueId = localStorage.getItem("wojakActiveQueueId") || "default";
 
       function setStatus(text, isError = false) {
         status.textContent = text;
@@ -369,9 +461,32 @@ function renderHomePage() {
         }, 1400);
       }
 
+      function renderQueues() {
+        if (!queues.some((queue) => queue.id === activeQueueId)) {
+          activeQueueId = queues[0]?.id || "default";
+        }
+        queueTabs.innerHTML = queues.map((queue) => {
+          const activeClass = queue.id === activeQueueId ? " active" : "";
+          const offClass = queue.enabled === false ? " off" : "";
+          const stateText = queue.enabled === false ? "（关）" : "";
+          return '<button class="queue-tab' + activeClass + offClass + '" type="button" data-queue-id="' + escapeHtml(queue.id) + '">' + escapeHtml(queue.name) + stateText + '</button>';
+        }).join("");
+        const activeQueue = queues.find((queue) => queue.id === activeQueueId);
+        const enabled = activeQueue?.enabled !== false;
+        queueState.textContent = enabled ? "已启动" : "已关闭";
+        queueState.className = enabled ? "queue-state" : "queue-state off";
+        toggleQueueBtn.textContent = enabled ? "关闭" : "启动";
+        deleteQueueBtn.disabled = queues.length <= 1;
+      }
+
       async function refreshTasks() {
-        const response = await fetch("/api/wojak/tasks");
+        const response = await fetch("/api/wojak/tasks?queueId=" + encodeURIComponent(activeQueueId));
         const payload = await response.json();
+        queues = payload.queues || queues;
+        activeQueueId = payload.queueId || activeQueueId;
+        localStorage.setItem("wojakActiveQueueId", activeQueueId);
+        renderQueues();
+
         const tasks = payload.tasks || [];
         const resultsByTaskId = new Map((payload.results || []).map((result) => [result.taskId, result]));
         const rows = tasks.slice().reverse().map((task) => {
@@ -381,19 +496,45 @@ function renderHomePage() {
           const copyButton = commentedUrl
             ? '<button class="copy-btn" type="button" data-copy="' + escapeHtml(commentedUrl) + '">复制</button>'
             : '<span class="empty-link">等待评论完成</span>';
+          const deleteButton = '<button class="copy-btn" type="button" data-delete-task-id="' + escapeHtml(task.id) + '">删除记录</button>';
           return '<tr>' +
             '<td><code>' + escapeHtml(task.targetUrl) + '</code></td>' +
             '<td>' + (commentedUrl ? '<code>' + escapeHtml(commentedUrl) + '</code>' : '<span class="empty-link">暂无</span>') + '</td>' +
             '<td><span class="' + badgeClass(task.state) + '">' + escapeHtml(task.state) + '</span>' + (task.error ? '<div class="status error">' + escapeHtml(task.error) + '</div>' : '') + '</td>' +
             '<td>' + escapeHtml(formatTime(completedAt)) + '</td>' +
-            '<td>' + copyButton + '</td>' +
+            '<td>' + copyButton + ' ' + deleteButton + '</td>' +
           '</tr>';
         }).join("");
 
-        taskCount.textContent = "共 " + tasks.length + " 条";
+        const activeQueue = queues.find((queue) => queue.id === activeQueueId);
+        taskCount.textContent = (activeQueue?.name || activeQueueId) + "，共 " + tasks.length + " 条";
         taskList.innerHTML = tasks.length
           ? '<table><thead><tr><th>目标链接</th><th>已评论链接</th><th>状态</th><th>评论时间</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>'
           : '<div class="empty">暂无任务</div>';
+      }
+
+      async function clearTasks() {
+        if (!confirm("确定清除当前所有任务队列和执行日志吗？")) {
+          return;
+        }
+
+        clearTasksBtn.disabled = true;
+        setStatus("正在清除...");
+
+        try {
+          const response = await fetch("/api/wojak/tasks?queueId=" + encodeURIComponent(activeQueueId), { method: "DELETE" });
+          const result = await response.json();
+          if (!response.ok) {
+            throw new Error(result.error || "清除失败");
+          }
+
+          setStatus("任务队列已清除。");
+          await refreshTasks();
+        } catch (error) {
+          setStatus(error.message, true);
+        } finally {
+          clearTasksBtn.disabled = false;
+        }
       }
 
       form.addEventListener("submit", async (event) => {
@@ -401,7 +542,8 @@ function renderHomePage() {
         setStatus("正在提交...");
 
         const payload = {
-          targetUrl: form.targetUrl.value.trim()
+          targetUrl: form.targetUrl.value.trim(),
+          allQueues: true
         };
 
         try {
@@ -416,20 +558,119 @@ function renderHomePage() {
           }
 
           form.targetUrl.value = "";
-          setStatus("已加入队列。");
+          setStatus("已加入所有队列。");
           await refreshTasks();
         } catch (error) {
           setStatus(error.message, true);
         }
       });
 
+      toggleQueueBtn.addEventListener("click", async () => {
+        const current = queues.find((queue) => queue.id === activeQueueId);
+        if (!current) return;
+        const response = await fetch("/api/wojak/queues/" + encodeURIComponent(activeQueueId), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: current.enabled === false })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          setStatus(result.error || "队列状态更新失败", true);
+          return;
+        }
+        setStatus(result.queue.enabled ? "队列已启动。" : "队列已关闭。");
+        await refreshTasks();
+      });
+
       taskList.addEventListener("click", (event) => {
-        const button = event.target.closest("[data-copy]");
+        const copyButton = event.target.closest("[data-copy]");
+        if (copyButton) {
+          copyText(copyButton.dataset.copy, copyButton).catch((error) => setStatus(error.message, true));
+          return;
+        }
+
+        const deleteButton = event.target.closest("[data-delete-task-id]");
+        if (!deleteButton || !confirm("确定删除这条任务记录吗？")) {
+          return;
+        }
+
+        fetch("/api/wojak/tasks/" + encodeURIComponent(deleteButton.dataset.deleteTaskId), { method: "DELETE" })
+          .then(async (response) => {
+            const result = await response.json();
+            if (!response.ok) {
+              throw new Error(result.error || "删除失败");
+            }
+            setStatus("任务记录已删除。");
+            await refreshTasks();
+          })
+          .catch((error) => setStatus(error.message, true));
+      });
+
+      queueTabs.addEventListener("click", async (event) => {
+        const button = event.target.closest("[data-queue-id]");
         if (!button) return;
-        copyText(button.dataset.copy, button).catch((error) => setStatus(error.message, true));
+        activeQueueId = button.dataset.queueId;
+        localStorage.setItem("wojakActiveQueueId", activeQueueId);
+        setStatus("");
+        await refreshTasks();
+      });
+
+      addQueueBtn.addEventListener("click", async () => {
+        const name = prompt("请输入队列名称");
+        if (!name) return;
+        const response = await fetch("/api/wojak/queues", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          setStatus(result.error || "新增队列失败", true);
+          return;
+        }
+        activeQueueId = result.queue.id;
+        localStorage.setItem("wojakActiveQueueId", activeQueueId);
+        setStatus("队列已新增。");
+        await refreshTasks();
+      });
+
+      renameQueueBtn.addEventListener("click", async () => {
+        const current = queues.find((queue) => queue.id === activeQueueId);
+        const name = prompt("请输入新的队列名称", current?.name || "");
+        if (!name) return;
+        const response = await fetch("/api/wojak/queues/" + encodeURIComponent(activeQueueId), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          setStatus(result.error || "重命名失败", true);
+          return;
+        }
+        setStatus("队列已重命名。");
+        await refreshTasks();
+      });
+
+      deleteQueueBtn.addEventListener("click", async () => {
+        const current = queues.find((queue) => queue.id === activeQueueId);
+        if (!current || !confirm("确定删除队列“" + current.name + "”及其任务日志吗？")) {
+          return;
+        }
+        const response = await fetch("/api/wojak/queues/" + encodeURIComponent(activeQueueId), { method: "DELETE" });
+        const result = await response.json();
+        if (!response.ok) {
+          setStatus(result.error || "删除队列失败", true);
+          return;
+        }
+        activeQueueId = result.queueId || "default";
+        localStorage.setItem("wojakActiveQueueId", activeQueueId);
+        setStatus("队列已删除。");
+        await refreshTasks();
       });
 
       document.getElementById("refreshBtn").addEventListener("click", refreshTasks);
+      clearTasksBtn.addEventListener("click", clearTasks);
       refreshTasks();
       window.setInterval(refreshTasks, 5000);
     </script>
@@ -446,21 +687,94 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/wojak/queues") {
+      sendJson(response, 200, { queues, defaultQueueId: DEFAULT_QUEUE_ID });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/wojak/queues") {
+      const payload = await readJson(request);
+      const queue = createQueue(payload);
+      queues.push(queue);
+      sendJson(response, 201, { queue, queues });
+      return;
+    }
+
+    const queueMatch = url.pathname.match(/^\/api\/wojak\/queues\/([^/]+)$/);
+    if (request.method === "PATCH" && queueMatch) {
+      const queue = queues.find((item) => item.id === queueMatch[1]);
+      if (!queue) {
+        sendJson(response, 404, { error: "Queue not found" });
+        return;
+      }
+      const payload = await readJson(request);
+      const name = String(payload.name || "").trim();
+      if (name) {
+        queue.name = name;
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, "enabled")) {
+        queue.enabled = Boolean(payload.enabled);
+      }
+      sendJson(response, 200, { queue, queues });
+      return;
+    }
+
+    if (request.method === "DELETE" && queueMatch) {
+      if (queues.length <= 1) {
+        sendJson(response, 400, { error: "至少保留一个队列" });
+        return;
+      }
+      const queueIndex = queues.findIndex((item) => item.id === queueMatch[1]);
+      if (queueIndex < 0) {
+        sendJson(response, 404, { error: "Queue not found" });
+        return;
+      }
+      const queueId = queues[queueIndex].id;
+      queues.splice(queueIndex, 1);
+      const removedTaskIds = new Set(tasks.filter((task) => task.queueId === queueId).map((task) => task.id));
+      for (let index = tasks.length - 1; index >= 0; index -= 1) {
+        if (tasks[index].queueId === queueId) {
+          tasks.splice(index, 1);
+        }
+      }
+      for (let index = results.length - 1; index >= 0; index -= 1) {
+        if (removedTaskIds.has(results[index].taskId)) {
+          results.splice(index, 1);
+        }
+      }
+      sendJson(response, 200, { ok: true, queueId: queues[0].id, queues });
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/wojak/tasks") {
       const payload = await readJson(request);
-      const task = createTask(payload);
-      if (!task.targetUrl) {
+      const targetUrl = String(payload.targetUrl || payload.url || "").trim();
+      if (!targetUrl) {
         sendJson(response, 400, { error: "targetUrl is required" });
         return;
       }
 
+      if (payload.allQueues) {
+        const createdTasks = queues.map((queue) => createTask({ ...payload, queueId: queue.id }));
+        tasks.push(...createdTasks);
+        sendJson(response, 201, { tasks: createdTasks });
+        return;
+      }
+
+      const task = createTask(payload);
       tasks.push(task);
       sendJson(response, 201, { task });
       return;
     }
 
     if (request.method === "GET" && url.pathname === "/api/wojak/tasks/next") {
-      const task = tasks.find((item) => item.state === "pending");
+      const queueId = normalizeQueueId(url.searchParams.get("queueId"));
+      const queue = queues.find((item) => item.id === queueId);
+      if (queue?.enabled === false) {
+        sendJson(response, 200, { task: null, queueDisabled: true });
+        return;
+      }
+      const task = tasks.find((item) => item.queueId === queueId && item.state === "pending");
 
       if (!task) {
         sendJson(response, 200, { task: null });
@@ -495,8 +809,56 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    const taskMatch = url.pathname.match(/^\/api\/wojak\/tasks\/([^/]+)$/);
+    if (request.method === "DELETE" && taskMatch) {
+      const taskId = taskMatch[1];
+      const taskIndex = tasks.findIndex((item) => item.id === taskId);
+      if (taskIndex < 0) {
+        sendJson(response, 404, { error: "Task not found" });
+        return;
+      }
+
+      // 只删除前台展示记录，不干预已经被扩展拿走的三连执行。
+      tasks.splice(taskIndex, 1);
+      for (let index = results.length - 1; index >= 0; index -= 1) {
+        if (results[index].taskId === taskId) {
+          results.splice(index, 1);
+        }
+      }
+      sendJson(response, 200, { ok: true });
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/api/wojak/tasks") {
-      sendJson(response, 200, { tasks, results });
+      const queueId = normalizeQueueId(url.searchParams.get("queueId"));
+      const queueTasks = tasks.filter((task) => task.queueId === queueId);
+      const queueTaskIds = new Set(queueTasks.map((task) => task.id));
+      const queueResults = results.filter((result) => queueTaskIds.has(result.taskId));
+      sendJson(response, 200, {
+        queueId,
+        queueName: queueLabel(queueId),
+        queues,
+        tasks: queueTasks,
+        results: queueResults
+      });
+      return;
+    }
+
+    if (request.method === "DELETE" && url.pathname === "/api/wojak/tasks") {
+      const queueId = normalizeQueueId(url.searchParams.get("queueId"));
+      // 清除当前窗口队列和对应执行结果日志。
+      const removedTaskIds = new Set(tasks.filter((task) => task.queueId === queueId).map((task) => task.id));
+      for (let index = tasks.length - 1; index >= 0; index -= 1) {
+        if (tasks[index].queueId === queueId) {
+          tasks.splice(index, 1);
+        }
+      }
+      for (let index = results.length - 1; index >= 0; index -= 1) {
+        if (removedTaskIds.has(results[index].taskId)) {
+          results.splice(index, 1);
+        }
+      }
+      sendJson(response, 200, { ok: true });
       return;
     }
 

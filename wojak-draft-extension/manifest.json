@@ -8,7 +8,8 @@
     "clipboardWrite",
     "downloads",
     "storage",
-    "tabs"
+    "tabs",
+    "windows"
   ],
   "host_permissions": [
     "http://*/*",
