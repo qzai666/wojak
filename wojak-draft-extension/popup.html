@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Wojak Draft Assistant</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Wojak Draft</h1>
+        <span id="listenBadge" class="badge">静默</span>
+      </header>
+
+      <section class="panel">
+        <label>
+          前端服务地址
+          <input id="remoteApiBaseUrl" type="url" placeholder="http://127.0.0.1:8787">
+        </label>
+        <p class="hint">监听开启后固定每 2 分钟操作一次；无链接时浏览首页随机点赞。</p>
+      </section>
+
+      <button id="listenBtn" class="primary" type="button">开始监听</button>
+
+      <p id="remoteStatus" class="status" role="status">当前处于静默状态</p>
+      <p id="monitorStatus" class="status" role="status">监听未启动</p>
+      <p id="autoLikeStatus" class="status" role="status">暂无执行中的任务</p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

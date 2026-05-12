@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Wojak Draft Assistant",
+  "version": "1.0.0",
+  "description": "Listen for Wojak tasks, auto like/repost/reply on X, and report completed links.",
+  "permissions": [
+    "alarms",
+    "clipboardWrite",
+    "downloads",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*",
+    "https://x.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://x.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "assets/*"
+      ],
+      "matches": [
+        "https://x.com/*"
+      ]
+    }
+  ],
+  "action": {
+    "default_title": "Wojak Draft Assistant",
+    "default_popup": "popup.html"
+  }
+}
