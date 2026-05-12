@@ -9,6 +9,7 @@ let autoLikeTask = null;
 let lastReloadAt = 0;
 let scriptStartedAt = Date.now();
 let isTicking = false;
+let homeBrowseCancelled = false;
 
 function sendMessage(message) {
   return new Promise((resolve) => {
@@ -156,8 +157,12 @@ function visibleArticles() {
 }
 
 async function humanScrollHome() {
+  homeBrowseCancelled = false;
   const steps = randomInt(3, 6);
   for (let step = 0; step < steps; step += 1) {
+    if (homeBrowseCancelled) {
+      return;
+    }
     const direction = step > 1 && Math.random() < 0.22 ? -1 : 1;
     const distance = randomInt(220, Math.max(360, Math.floor(window.innerHeight * 0.85))) * direction;
     window.scrollBy({
@@ -165,6 +170,9 @@ async function humanScrollHome() {
       behavior: "smooth"
     });
     await delay(randomInt(900, 2200));
+    if (homeBrowseCancelled) {
+      return;
+    }
 
     if (Math.random() < 0.28) {
       window.scrollBy({
@@ -251,19 +259,13 @@ function fillTextbox(textbox, text) {
   selection.removeAllRanges();
   selection.addRange(range);
 
-  textbox.dispatchEvent(new InputEvent("beforeinput", {
+  document.execCommand("delete", false, null);
+  textbox.dispatchEvent(new InputEvent("input", {
     bubbles: true,
-    cancelable: true,
+    composed: true,
     inputType: "deleteContentBackward"
   }));
-  document.execCommand("delete", false, null);
 
-  textbox.dispatchEvent(new InputEvent("beforeinput", {
-    bubbles: true,
-    cancelable: true,
-    inputType: "insertText",
-    data: text
-  }));
   document.execCommand("insertText", false, text);
   textbox.dispatchEvent(new InputEvent("input", {
     bubbles: true,
@@ -301,15 +303,25 @@ function scopedComposerTextIncludes(textbox, text) {
   return textboxText.includes(expected) || inlineReplyText.includes(expected) || composerText.includes(expected) || draftBlockText.includes(expected);
 }
 
+function composerTextEquals(textbox, text) {
+  return normalizeText(textbox.textContent || "") === normalizeText(text);
+}
+
 async function ensureReplyText(textbox, text) {
   for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (composerTextEquals(textbox, text)) {
+      return;
+    }
+
+    fillTextbox(textbox, text);
+    let hasText = await waitForCondition(() => composerTextEquals(textbox, text), 1500, 200);
+    if (hasText) {
+      return;
+    }
+
     fillTextbox(textbox, "");
     pasteTextIntoTextbox(textbox, text);
-    let hasText = await waitForCondition(() => scopedComposerTextIncludes(textbox, text), 1500, 200);
-    if (!hasText) {
-      fillTextbox(textbox, text);
-      hasText = await waitForCondition(() => scopedComposerTextIncludes(textbox, text), 1500, 200);
-    }
+    hasText = await waitForCondition(() => composerTextEquals(textbox, text), 1500, 200);
     if (hasText) {
       return;
     }
@@ -514,6 +526,15 @@ function normalizeText(text) {
   return String(text).replace(/\s+/g, " ").trim();
 }
 
+function cleanCommentText(text) {
+  return String(text || "")
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function getArticleStatusUrls(article) {
   return Array.from(article.querySelectorAll('a[href*="/status/"]'))
     .map((link) => normalizeXUrl(link.href))
@@ -605,6 +626,7 @@ async function ensureLiked(article) {
 }
 
 async function browseHome(options = {}) {
+  homeBrowseCancelled = false;
   const shouldLike = options.shouldLike !== false;
   if (!location.pathname.startsWith("/home")) {
     location.assign("https://x.com/home");
@@ -614,7 +636,13 @@ async function browseHome(options = {}) {
   await waitForCondition(() => isPageReady() && document.querySelector("article"), 8000, 500);
   // 无任务时先浏览一段首页；是否点赞由后台的首页点赞间隔决定。
   await delay(randomInt(800, 1800));
+  if (homeBrowseCancelled) {
+    return { browsed: false, liked: false, reason: "cancelled" };
+  }
   await humanScrollHome();
+  if (homeBrowseCancelled) {
+    return { browsed: true, liked: false, reason: "cancelled" };
+  }
   if (!shouldLike) {
     return { browsed: true, liked: false, reason: "scroll_only" };
   }
@@ -688,11 +716,12 @@ async function ensureReposted(article) {
 }
 
 async function publishReply(task) {
-  if (!task.commentText) {
+  const commentText = cleanCommentText(task.commentText);
+  if (!commentText) {
     throw new Error("Comment text is empty");
   }
 
-  if (hasExistingReply(task.commentText)) {
+  if (hasExistingReply(commentText)) {
     await stopTask({ state: "already_replied", completedAt: Date.now() });
     return;
   }
@@ -703,7 +732,7 @@ async function publishReply(task) {
     throw new Error("Reply textbox not found");
   }
 
-  await ensureReplyText(textbox, task.commentText);
+  await ensureReplyText(textbox, commentText);
   const root = findComposerElement(textbox);
 
   if (task.imageAssetPath) {
@@ -719,20 +748,20 @@ async function publishReply(task) {
 
   const beforeStatusIds = getVisibleStatusIds();
   const finalTextbox = findReplyTextbox() || textbox;
-  await ensureReplyText(finalTextbox, task.commentText);
+  await ensureReplyText(finalTextbox, commentText);
 
   await reportState({ state: "publishing" });
   const finalRoot = findComposerElement(finalTextbox);
-  if (!scopedComposerTextIncludes(finalTextbox, task.commentText)) {
+  if (!composerTextEquals(finalTextbox, commentText)) {
     throw new Error("Reply text disappeared before publishing");
   }
   const button = await waitForEnabledButton(finalRoot);
   button.click();
   await delay(3000);
   const replyUrl = await waitForCondition(() => {
-    return findReplyUrl(task.commentText, beforeStatusIds, task.statusId);
+    return findReplyUrl(commentText, beforeStatusIds, task.statusId);
   }, 25000, 500);
-  if (!replyUrl && hasExistingReply(task.commentText)) {
+  if (!replyUrl && hasExistingReply(commentText)) {
     await stopTask({
       state: "replied",
       completedAt: Date.now(),
@@ -838,6 +867,12 @@ async function startAutoLike(task) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "STOP_HOME_BROWSE") {
+    homeBrowseCancelled = true;
+    sendResponse({ ok: true });
+    return true;
+  }
+
   if (message?.type !== "BROWSE_HOME") {
     return false;
   }

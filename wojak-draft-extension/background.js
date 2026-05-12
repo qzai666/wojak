@@ -93,6 +93,15 @@ function getStatusId(url) {
   return match ? match[1] : "";
 }
 
+function cleanCommentText(text) {
+  return String(text || "")
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function actionStorageKey(baseKey, queueId) {
   return `${baseKey}:${queueId || DEFAULT_QUEUE_ID}`;
 }
@@ -153,7 +162,7 @@ async function getRemoteConfigForWindow(windowId = null) {
 
 async function setRemoteConfig(config) {
   const nextConfig = {
-    enabled: Boolean(config.enabled),
+    enabled: Number.isInteger(config.windowId) ? false : Boolean(config.enabled),
     apiBaseUrl: String(config.apiBaseUrl || "").trim().replace(/\/+$/, ""),
     queueId: String(config.queueId || DEFAULT_QUEUE_ID),
     pollMinutes: ACTION_INTERVAL_MINUTES
@@ -162,15 +171,18 @@ async function setRemoteConfig(config) {
   if (Number.isInteger(config.windowId)) {
     await chrome.storage.local.set({ [MONITOR_WINDOW_ID_KEY]: config.windowId });
     await setWindowMonitorConfig(config.windowId, {
-      enabled: nextConfig.enabled,
+      enabled: Boolean(config.enabled),
       queueId: nextConfig.queueId
     });
+    if (!config.enabled) {
+      await stopHomeBrowse(config.windowId);
+    }
   }
-  if (nextConfig.enabled) {
+  if (Boolean(config.enabled)) {
     await chrome.storage.local.remove(actionStorageKey(LAST_TARGET_ACTION_AT_KEY, nextConfig.queueId));
   }
   await scheduleRemotePoll(nextConfig);
-  if (nextConfig.enabled && nextConfig.apiBaseUrl) {
+  if (Boolean(config.enabled) && nextConfig.apiBaseUrl) {
     checkRemoteTasks({ windowId: config.windowId }).catch((error) => {
       chrome.storage.local.set({
         remoteTaskMonitorLastError: error.message,
@@ -178,7 +190,10 @@ async function setRemoteConfig(config) {
       });
     });
   }
-  return nextConfig;
+  return {
+    ...nextConfig,
+    enabled: Boolean(config.enabled)
+  };
 }
 
 async function scheduleRemotePoll(config = null) {
@@ -382,6 +397,20 @@ async function browseHome({ shouldLike, windowId, queueId }) {
   return response;
 }
 
+async function stopHomeBrowse(windowId = null) {
+  const monitorWindowId = await resolveMonitorWindowId(windowId);
+  const query = monitorWindowId
+    ? { url: ["https://x.com/*"], windowId: monitorWindowId }
+    : { url: ["https://x.com/*"] };
+  const tabs = await chrome.tabs.query(query);
+  await Promise.all(tabs.map((tab) => {
+    if (!tab.id) {
+      return Promise.resolve();
+    }
+    return chrome.tabs.sendMessage(tab.id, { type: "STOP_HOME_BROWSE" }).catch(() => {});
+  }));
+}
+
 function remoteHeaders(config) {
   return { Accept: "application/json" };
 }
@@ -396,7 +425,7 @@ function normalizeRemoteTask(remoteTask) {
     remoteTaskId: String(remoteTask.id || ""),
     queueId: String(remoteTask.queueId || DEFAULT_QUEUE_ID),
     targetUrl: remoteTask.targetUrl || remoteTask.url || "",
-    commentText: ensureKeyword(remoteTask.commentText || polish(pick(defaultComments))),
+    commentText: cleanCommentText(ensureKeyword(remoteTask.commentText || polish(pick(defaultComments)))),
     imageAssetPath,
     imageFileName: remoteTask.imageFileName || imageAssetPath.split("/").pop() || ""
   };
@@ -566,7 +595,7 @@ async function startAutoLike({ tabId, targetUrl, commentText, imageAssetPath, im
   tasks[String(tabId)] = {
     targetUrl: normalizedUrl,
     statusId,
-    commentText: String(commentText || "").trim(),
+    commentText: cleanCommentText(commentText),
     imageAssetPath: imageAssetPath || "",
     imageFileName: imageFileName || "",
     remoteTaskId: remoteTaskId || "",
@@ -705,7 +734,8 @@ async function pollEnabledWindows() {
   const monitorMap = await getWindowMonitorMap();
   const entries = Object.entries(monitorMap).filter(([, config]) => config?.enabled);
   if (!entries.length) {
-    await checkRemoteTasks();
+    await chrome.alarms.clear(REMOTE_POLL_ALARM);
+    await setMonitorStatus({ state: "silent", message: "当前处于静默状态" });
     return;
   }
 

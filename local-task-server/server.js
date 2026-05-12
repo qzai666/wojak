@@ -57,6 +57,15 @@ function queueLabel(queueId) {
   return queues.find((queue) => queue.id === queueId)?.name || queueId;
 }
 
+function cleanCommentText(text) {
+  return String(text || "")
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function createQueue(payload) {
   const name = String(payload.name || "").trim();
   return {
@@ -71,7 +80,7 @@ function createTask(payload) {
     id: crypto.randomUUID(),
     queueId: normalizeQueueId(payload.queueId),
     targetUrl: String(payload.targetUrl || payload.url || "").trim(),
-    commentText: String(payload.commentText || "").trim(),
+    commentText: cleanCommentText(payload.commentText),
     imageAssetPath: String(payload.imageAssetPath || "").trim(),
     imageFileName: String(payload.imageFileName || "").trim(),
     state: "pending",
@@ -86,7 +95,7 @@ function pick(items) {
 function loadRandomComment() {
   const comments = JSON.parse(fs.readFileSync(COMMENTS_PATH, "utf8"));
   const item = pick(comments);
-  return String(item?.content || "").trim();
+  return cleanCommentText(item?.content);
 }
 
 function renderHomePage() {
@@ -755,7 +764,9 @@ const server = http.createServer(async (request, response) => {
       }
 
       if (payload.allQueues) {
-        const createdTasks = queues.map((queue) => createTask({ ...payload, queueId: queue.id }));
+        const createdTasks = queues
+          .filter((queue) => queue.enabled !== false)
+          .map((queue) => createTask({ ...payload, queueId: queue.id }));
         tasks.push(...createdTasks);
         sendJson(response, 201, { tasks: createdTasks });
         return;
