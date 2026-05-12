@@ -244,38 +244,59 @@ function findReplyTextbox() {
   return textboxes.find((textbox) => isVisible(textbox) && textbox.getAttribute("aria-label") !== "Search query") || null;
 }
 
-function fillTextbox(textbox, text) {
-  textbox.scrollIntoView({ block: "center" });
-  textbox.focus();
+function findReplyActionButton(article) {
+  const button = article?.querySelector('button[data-testid="reply"], [data-testid="reply"]');
+  return button && isVisible(button) ? button : null;
+}
 
-  const existingText = (textbox.textContent || "").trim();
-  if (existingText === text.trim()) {
-    return;
+function findReplyDialog() {
+  const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(isVisible);
+  return dialogs.find((dialog) => dialog.querySelector('[data-testid="tweetTextarea_0"]')) || null;
+}
+
+async function openReplyDialog(article) {
+  const existingDialog = findReplyDialog();
+  if (existingDialog) {
+    return existingDialog;
   }
 
+  const replyButton = findReplyActionButton(article);
+  if (!replyButton) {
+    throw new Error("Reply action button not found");
+  }
+
+  replyButton.click();
+  const dialog = await waitForCondition(findReplyDialog, 8000, 250);
+  if (!dialog) {
+    throw new Error("Reply dialog did not open");
+  }
+  return dialog;
+}
+
+function findDialogReplyTextbox(dialog) {
+  const selectors = [
+    '[data-testid="tweetTextarea_0"][contenteditable="true"]',
+    '[data-testid="tweetTextarea_0"] [contenteditable="true"]',
+    'div[role="textbox"][contenteditable="true"]'
+  ];
+  const textboxes = selectors.flatMap((selector) => Array.from(dialog.querySelectorAll(selector)));
+  return textboxes.find((textbox) => isVisible(textbox) && textbox.getAttribute("aria-label") !== "Search query") || null;
+}
+
+function placeCursorAtEnd(element) {
   const selection = window.getSelection();
   const range = document.createRange();
-  range.selectNodeContents(textbox);
+  range.selectNodeContents(element);
+  range.collapse(false);
   selection.removeAllRanges();
   selection.addRange(range);
-
-  document.execCommand("delete", false, null);
-  textbox.dispatchEvent(new InputEvent("input", {
-    bubbles: true,
-    composed: true,
-    inputType: "deleteContentBackward"
-  }));
-
-  document.execCommand("insertText", false, text);
-  textbox.dispatchEvent(new InputEvent("input", {
-    bubbles: true,
-    composed: true,
-    inputType: "insertText",
-    data: text
-  }));
 }
 
 function pasteTextIntoTextbox(textbox, text) {
+  textbox.scrollIntoView({ block: "center" });
+  textbox.focus();
+  placeCursorAtEnd(textbox);
+
   try {
     const transfer = new DataTransfer();
     transfer.setData("text/plain", text);
@@ -291,6 +312,44 @@ function pasteTextIntoTextbox(textbox, text) {
   }
 }
 
+function execInsertTextboxText(textbox, text) {
+  textbox.scrollIntoView({ block: "center" });
+  textbox.focus();
+  placeCursorAtEnd(textbox);
+  document.execCommand("insertText", false, text);
+  textbox.dispatchEvent(new InputEvent("input", {
+    bubbles: true,
+    composed: true,
+    inputType: "insertText",
+    data: text
+  }));
+}
+
+function composerTextIncludes(textbox, text) {
+  const expected = normalizeText(cleanCommentText(text));
+  const root = findComposerElement(textbox);
+  const candidates = [
+    textbox.textContent || "",
+    textbox.innerText || "",
+    root.querySelector('[data-testid="inline_reply_offscreen"]')?.textContent || "",
+    Array.from(root.querySelectorAll("div.public-DraftStyleDefault-block"))
+      .map((block) => block.textContent || "")
+      .join(" "),
+    root.textContent || ""
+  ];
+
+  return candidates.some((value) => normalizeText(cleanCommentText(value)).includes(expected));
+}
+
+function dispatchFinalTextInput(textbox, text) {
+  textbox.dispatchEvent(new InputEvent("input", {
+    bubbles: true,
+      composed: true,
+      inputType: "insertText",
+      data: text
+    }));
+}
+
 function scopedComposerTextIncludes(textbox, text) {
   const expected = normalizeText(text);
   const root = findComposerElement(textbox);
@@ -304,27 +363,35 @@ function scopedComposerTextIncludes(textbox, text) {
 }
 
 function composerTextEquals(textbox, text) {
-  return normalizeText(textbox.textContent || "") === normalizeText(text);
+  const expected = normalizeText(cleanCommentText(text));
+  const root = findComposerElement(textbox);
+  const candidates = [
+    textbox.textContent || "",
+    textbox.innerText || "",
+    root.querySelector('[data-testid="inline_reply_offscreen"]')?.textContent || "",
+    Array.from(root.querySelectorAll("div.public-DraftStyleDefault-block"))
+      .map((block) => block.textContent || "")
+      .join(" ")
+  ];
+
+  return candidates.some((value) => normalizeText(cleanCommentText(value)) === expected);
 }
 
 async function ensureReplyText(textbox, text) {
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    if (composerTextEquals(textbox, text)) {
-      return;
-    }
+  if (composerTextIncludes(textbox, text)) {
+    return;
+  }
 
-    fillTextbox(textbox, text);
-    let hasText = await waitForCondition(() => composerTextEquals(textbox, text), 1500, 200);
-    if (hasText) {
-      return;
-    }
+  pasteTextIntoTextbox(textbox, text);
+  if (await waitForCondition(() => composerTextIncludes(textbox, text), 1500, 150)) {
+    dispatchFinalTextInput(textbox, text);
+    return;
+  }
 
-    fillTextbox(textbox, "");
-    pasteTextIntoTextbox(textbox, text);
-    hasText = await waitForCondition(() => composerTextEquals(textbox, text), 1500, 200);
-    if (hasText) {
-      return;
-    }
+  execInsertTextboxText(textbox, text);
+  if (await waitForCondition(() => composerTextIncludes(textbox, text), 1500, 150)) {
+    dispatchFinalTextInput(textbox, text);
+    return;
   }
 
   throw new Error("Reply text did not fill");
@@ -349,7 +416,7 @@ function findComposerRoot(textbox) {
 }
 
 function findComposerElement(textbox) {
-  return textbox.closest("article") || findComposerRoot(textbox);
+  return textbox.closest('[role="dialog"]') || textbox.closest("article") || findComposerRoot(textbox);
 }
 
 function findFileInput(root) {
@@ -427,6 +494,10 @@ function hasActiveUpload(root) {
   return Boolean(root.querySelector('[aria-label*="Uploading"], [aria-label*="uploading"], [aria-label*="上传"]'));
 }
 
+function isButtonEnabled(button) {
+  return Boolean(button && !button.disabled && button.getAttribute("aria-disabled") !== "true");
+}
+
 function findClosestFileInput(root) {
   const scopedInput = findFileInput(root);
   if (scopedInput) {
@@ -483,18 +554,14 @@ async function waitForImageAttachment(root, beforeMediaCount) {
   const relaxedDeadline = Date.now() + 3000;
 
   while (Date.now() < deadline) {
-    if (hasInlineReplyPreview(root)) {
-      return;
-    }
-
     const hasNewMedia = mediaMarkerCount(root) > beforeMediaCount;
     const hasComposerMedia = hasImageAttachment(root);
-    if ((hasComposerMedia || hasNewMedia) && !hasActiveUpload(root)) {
+    const button = findTweetSubmitButton(root);
+    const buttonReady = isButtonEnabled(button);
+    if ((hasInlineReplyPreview(root) || hasComposerMedia || hasNewMedia) && buttonReady && !hasActiveUpload(root)) {
       return;
     }
 
-    const button = findReplyButton(root);
-    const buttonReady = button && !button.disabled && button.getAttribute("aria-disabled") !== "true";
     if (Date.now() >= relaxedDeadline && buttonReady && !hasActiveUpload(root)) {
       return;
     }
@@ -505,7 +572,7 @@ async function waitForImageAttachment(root, beforeMediaCount) {
   throw new Error("Image attachment preview did not appear");
 }
 
-function findReplyButton(root) {
+function findTweetSubmitButton(root) {
   const direct = root.querySelector('[data-testid="tweetButtonInline"], [data-testid="tweetButton"]');
   if (direct) {
     return direct;
@@ -585,18 +652,45 @@ function hasExistingReply(commentText) {
 
 async function waitForEnabledButton(root) {
   const deadline = Date.now() + UPLOAD_WAIT_MS + 10000;
-  let button = findReplyButton(root);
+  let button = findTweetSubmitButton(root);
 
-  while ((!button || button.disabled || button.getAttribute("aria-disabled") === "true") && Date.now() < deadline) {
+  while (!isButtonEnabled(button) && Date.now() < deadline) {
     await delay(SHORT_WAIT_MS);
-    button = findReplyButton(root);
+    button = findTweetSubmitButton(root);
   }
 
-  if (!button || button.disabled || button.getAttribute("aria-disabled") === "true") {
+  if (!isButtonEnabled(button)) {
     throw new Error("Reply button did not become enabled");
   }
 
   return button;
+}
+
+async function clickTweetButtonAndWait(root, commentText, beforeStatusIds, targetStatusId) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const button = await waitForEnabledButton(root);
+    button.scrollIntoView({ block: "center" });
+    button.click();
+
+    const result = await waitForCondition(() => {
+      const replyUrl = findReplyUrl(commentText, beforeStatusIds, targetStatusId);
+      if (replyUrl) {
+        return { ok: true, replyUrl };
+      }
+      if (!isVisible(root)) {
+        return { ok: true, replyUrl: "" };
+      }
+      return null;
+    }, 8000, 500);
+
+    if (result?.ok) {
+      return result.replyUrl || "";
+    }
+
+    await delay(1500);
+  }
+
+  throw new Error("Reply dialog stayed open after sending");
 }
 
 async function ensureLiked(article) {
@@ -727,13 +821,20 @@ async function publishReply(task) {
   }
 
   await reportState({ state: "composing" });
-  const textbox = findReplyTextbox();
+  const article = getTargetArticle(task);
+  if (!article) {
+    throw new Error("Target article not found");
+  }
+
+  const dialog = await openReplyDialog(article);
+  await delay(3000);
+  const textbox = findDialogReplyTextbox(dialog);
   if (!textbox) {
     throw new Error("Reply textbox not found");
   }
 
   await ensureReplyText(textbox, commentText);
-  const root = findComposerElement(textbox);
+  const root = dialog;
 
   if (task.imageAssetPath) {
     await reportState({ state: "uploading_image" });
@@ -747,20 +848,15 @@ async function publishReply(task) {
   }
 
   const beforeStatusIds = getVisibleStatusIds();
-  const finalTextbox = findReplyTextbox() || textbox;
-  await ensureReplyText(finalTextbox, commentText);
+  const finalTextbox = textbox;
 
   await reportState({ state: "publishing" });
-  const finalRoot = findComposerElement(finalTextbox);
-  if (!composerTextEquals(finalTextbox, commentText)) {
-    throw new Error("Reply text disappeared before publishing");
+  const finalRoot = dialog;
+  await delay(5000);
+  if (!composerTextIncludes(finalTextbox, commentText)) {
+    throw new Error("Reply text is not present before publishing");
   }
-  const button = await waitForEnabledButton(finalRoot);
-  button.click();
-  await delay(3000);
-  const replyUrl = await waitForCondition(() => {
-    return findReplyUrl(commentText, beforeStatusIds, task.statusId);
-  }, 25000, 500);
+  const replyUrl = await clickTweetButtonAndWait(finalRoot, commentText, beforeStatusIds, task.statusId);
   if (!replyUrl && hasExistingReply(commentText)) {
     await stopTask({
       state: "replied",

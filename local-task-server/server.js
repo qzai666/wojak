@@ -200,6 +200,13 @@ function renderHomePage() {
         padding: 0 10px;
       }
 
+      button.copy-btn.copied {
+        border-color: rgba(34, 197, 94, 0.55);
+        color: #bbf7d0;
+        background: rgba(34, 197, 94, 0.2);
+        cursor: default;
+      }
+
       .status {
         min-height: 20px;
         margin: 10px 0 0;
@@ -461,13 +468,9 @@ function renderHomePage() {
       async function copyText(text, button) {
         if (!text) return;
         await navigator.clipboard.writeText(text);
-        const oldText = button.textContent;
         button.textContent = "已复制";
+        button.classList.add("copied");
         button.disabled = true;
-        setTimeout(() => {
-          button.textContent = oldText;
-          button.disabled = false;
-        }, 1400);
       }
 
       function renderQueues() {
