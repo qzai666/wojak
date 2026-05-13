@@ -1,5 +1,5 @@
 const AUTO_LIKE_INTERVAL_MS = 3000;
-const TARGET_LOAD_TIMEOUT_MS = 5000;
+const TARGET_LOAD_TIMEOUT_MS = 10000;
 const MAX_TARGET_REFRESH_COUNT = 3;
 const SHORT_WAIT_MS = 500;
 const UPLOAD_WAIT_MS = 15000;
@@ -1023,7 +1023,7 @@ async function refreshIfNeeded(task) {
   if (targetRefreshCount >= MAX_TARGET_REFRESH_COUNT) {
     await stopTask({
       state: "error",
-      error: "目标帖子 5 秒内加载失败，刷新 3 次后仍未就绪",
+      error: "目标帖子 10 秒内加载失败，刷新 3 次后仍未就绪",
       completedAt: Date.now()
     });
     return;

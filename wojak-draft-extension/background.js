@@ -427,10 +427,20 @@ async function browseHome({ shouldLike, windowId, queueId }) {
     }
   }
 
-  const response = await sendTabMessageWithRetry(tab.id, {
+  let response = await sendTabMessageWithRetry(tab.id, {
     type: "BROWSE_HOME",
     shouldLike
   });
+  // 扩展重载后，已打开的首页 tab 可能还没重新注入 content script，这里主动刷新一次再重试。
+  if (!response.ok) {
+    await chrome.tabs.reload(tab.id);
+    await waitForTabComplete(tab.id);
+    await delay(1500);
+    response = await sendTabMessageWithRetry(tab.id, {
+      type: "BROWSE_HOME",
+      shouldLike
+    });
+  }
   if (shouldLike && response.ok) {
     await markActionStarted(actionStorageKey(LAST_IDLE_ACTION_AT_KEY, queueId));
   }
