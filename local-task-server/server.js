@@ -12,6 +12,8 @@ const COMMENTS_PATH = path.resolve(__dirname, "../comments.json");
 const ORIGINAL_PATH = path.resolve(__dirname, "../Original.json");
 const IMAGE_DIR = path.resolve(__dirname, "../image");
 const DEFAULT_QUEUE_ID = queues[0].id;
+const RUNNING_TASK_TIMEOUT_MS = 10 * 60 * 1000;
+const TERMINAL_TASK_STATES = new Set(["replied", "spam_reply", "already_replied", "error", "done"]);
 
 function sendHtml(response, html) {
   response.writeHead(200, {
@@ -148,6 +150,29 @@ function loadRandomImageUrl(request) {
     imageAssetPath: `${origin}/image/${encodeURIComponent(fileName)}`,
     imageFileName: fileName
   };
+}
+
+function isTaskActive(task) {
+  return Boolean(task) && task.state !== "pending" && !TERMINAL_TASK_STATES.has(task.state);
+}
+
+function releaseStaleRunningTasks(queueId = null) {
+  const now = Date.now();
+  tasks.forEach((task) => {
+    if (!isTaskActive(task) || (queueId && task.queueId !== queueId)) {
+      return;
+    }
+    const lastHeartbeatAt = new Date(task.heartbeatAt || task.updatedAt || task.startedAt || task.createdAt || 0).getTime();
+    if (!lastHeartbeatAt || now - lastHeartbeatAt < RUNNING_TASK_TIMEOUT_MS) {
+      return;
+    }
+    task.state = "pending";
+    task.error = "运行超时，已重新排队";
+    task.startedAt = "";
+    task.heartbeatAt = "";
+    task.updatedAt = new Date().toISOString();
+    task.retryCount = (Number(task.retryCount) || 0) + 1;
+  });
 }
 
 function renderHomePage() {
@@ -597,6 +622,7 @@ function renderHomePage() {
             '<td>' + (isOriginal ? '<span class="task-tag">原创贴</span>' : '') + '<code>' + escapeHtml(task.targetUrl || task.originalText || "") + '</code></td>' +
             '<td>' + (commentedUrl ? '<code>' + escapeHtml(commentedUrl) + '</code>' : (isSpamReply ? '<span class="empty-link">可能的垃圾贴</span>' : '<span class="empty-link">暂无</span>')) + '</td>' +
             '<td><span class="' + badgeClass(task.state) + '">' + escapeHtml(task.state) + '</span>' + (task.error ? '<div class="status error">' + escapeHtml(task.error) + '</div>' : '') + '</td>' +
+            '<td>' + escapeHtml(formatTime(task.createdAt)) + '</td>' +
             '<td>' + escapeHtml(formatTime(completedAt)) + '</td>' +
             '<td>' + copyButton + ' ' + deleteButton + '</td>' +
           '</tr>';
@@ -605,7 +631,7 @@ function renderHomePage() {
         const activeQueue = queues.find((queue) => queue.id === activeQueueId);
         taskCount.textContent = (activeQueue?.name || activeQueueId) + "，共 " + tasks.length + " 条";
         taskList.innerHTML = tasks.length
-          ? '<table><thead><tr><th>目标链接</th><th>已评论链接</th><th>状态</th><th>评论时间</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>'
+          ? '<table><thead><tr><th>目标链接</th><th>已评论链接</th><th>状态</th><th>创建时间</th><th>评论时间</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>'
           : '<div class="empty">暂无任务</div>';
       }
 
@@ -959,6 +985,14 @@ const server = http.createServer(async (request, response) => {
         sendJson(response, 200, { task: null, queueDisabled: true });
         return;
       }
+
+      releaseStaleRunningTasks(queueId);
+      const runningTask = tasks.find((item) => item.queueId === queueId && isTaskActive(item));
+      if (runningTask) {
+        sendJson(response, 200, { task: null, runningTaskId: runningTask.id });
+        return;
+      }
+
       const task = tasks.find((item) => item.queueId === queueId && item.state === "pending");
 
       if (!task) {
@@ -972,9 +1006,31 @@ const server = http.createServer(async (request, response) => {
       if (task.type === "original" && !task.originalText) {
         task.originalText = loadRandomOriginal();
       }
+      const startedAt = new Date().toISOString();
       task.state = "running";
-      task.startedAt = new Date().toISOString();
+      task.startedAt = startedAt;
+      task.heartbeatAt = startedAt;
+      task.updatedAt = startedAt;
+      task.error = "";
       sendJson(response, 200, { task });
+      return;
+    }
+
+    const progressMatch = url.pathname.match(/^\/api\/wojak\/tasks\/([^/]+)\/progress$/);
+    if (request.method === "POST" && progressMatch) {
+      const payload = await readJson(request);
+      const task = tasks.find((item) => item.id === progressMatch[1]);
+      if (!task) {
+        sendJson(response, 404, { error: "Task not found" });
+        return;
+      }
+
+      const heartbeatAt = new Date().toISOString();
+      task.state = payload.state || task.state || "running";
+      task.error = payload.error || "";
+      task.heartbeatAt = heartbeatAt;
+      task.updatedAt = heartbeatAt;
+      sendJson(response, 200, { ok: true, task });
       return;
     }
 
@@ -982,16 +1038,19 @@ const server = http.createServer(async (request, response) => {
     if (request.method === "POST" && resultMatch) {
       const payload = await readJson(request);
       const task = tasks.find((item) => item.id === resultMatch[1]);
+      const completedAt = new Date().toISOString();
       if (task) {
         task.state = payload.state || "done";
         task.error = payload.error || "";
-        task.completedAt = new Date().toISOString();
+        task.completedAt = completedAt;
+        task.heartbeatAt = completedAt;
+        task.updatedAt = completedAt;
       }
 
       results.push({
         taskId: resultMatch[1],
         ...payload,
-        receivedAt: new Date().toISOString()
+        receivedAt: completedAt
       });
       sendJson(response, 200, { ok: true });
       return;
@@ -1019,6 +1078,7 @@ const server = http.createServer(async (request, response) => {
 
     if (request.method === "GET" && url.pathname === "/api/wojak/tasks") {
       const queueId = normalizeQueueId(url.searchParams.get("queueId"));
+      releaseStaleRunningTasks(queueId);
       const queueTasks = tasks.filter((task) => task.queueId === queueId);
       const queueTaskIds = new Set(queueTasks.map((task) => task.id));
       const queueResults = results.filter((result) => queueTaskIds.has(result.taskId));

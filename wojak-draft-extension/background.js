@@ -14,6 +14,7 @@ const ACTION_INTERVAL_MINUTES = 2;
 const POLL_INTERVAL_MS = 30 * 1000;
 const POLL_INTERVAL_MINUTES = 0.5;
 const HOME_URL = "https://x.com/home";
+const LOCAL_TASK_TIMEOUT_MS = 10 * 60 * 1000;
 const TERMINAL_STATES = new Set(["replied", "spam_reply", "already_replied", "error"]);
 
 const defaultComments = [
@@ -66,6 +67,10 @@ const imageAssetPaths = [
 
 function pick(items) {
   return items[Math.floor(Math.random() * items.length)];
+}
+
+function randomInt(min, max) {
+  return Math.floor(min + Math.random() * (max - min + 1));
 }
 
 function ensureKeyword(text) {
@@ -280,6 +285,10 @@ async function getActionWaitMs(key, defaultIntervalMs) {
   const lastActionAt = await getLastActionAt(key);
   const intervalMs = await getActionIntervalMs(key, defaultIntervalMs);
   return Math.max(0, intervalMs - (Date.now() - lastActionAt));
+}
+
+function getTaskActivityAt(task) {
+  return Number(task?.updatedAt) || Number(task?.startedAt) || 0;
 }
 
 async function canStartAction(key, defaultIntervalMs) {
@@ -514,13 +523,37 @@ async function hasPendingRemoteTask(config) {
   };
 }
 
+async function reportRemoteProgress(task) {
+  const config = await getRemoteConfig();
+  if (!config.apiBaseUrl || !task.remoteTaskId || TERMINAL_STATES.has(task.state)) {
+    return;
+  }
+
+  const response = await fetch(remoteUrl(config, `/api/wojak/tasks/${encodeURIComponent(task.remoteTaskId)}/progress`), {
+    method: "POST",
+    headers: {
+      ...remoteHeaders(config),
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      state: task.state,
+      error: task.error || "",
+      targetUrl: task.targetUrl,
+      statusId: task.statusId || ""
+    })
+  });
+  if (!response.ok) {
+    throw new Error(`Remote progress report failed: ${response.status}`);
+  }
+}
+
 async function reportRemoteResult(task) {
   const config = await getRemoteConfig();
   if (!config.apiBaseUrl || !task.remoteTaskId) {
     return;
   }
 
-  await fetch(remoteUrl(config, `/api/wojak/tasks/${encodeURIComponent(task.remoteTaskId)}/result`), {
+  const response = await fetch(remoteUrl(config, `/api/wojak/tasks/${encodeURIComponent(task.remoteTaskId)}/result`), {
     method: "POST",
     headers: {
       ...remoteHeaders(config),
@@ -537,6 +570,66 @@ async function reportRemoteResult(task) {
       completedAt: new Date().toISOString()
     })
   });
+  if (!response.ok) {
+    throw new Error(`Remote result report failed: ${response.status}`);
+  }
+}
+
+// 页面卡住或脚本失联时，本地任务会一直占着队列，这里定时回收。
+async function releaseStaleLocalTasks(queueId = null) {
+  const tasks = await getTasks();
+  const now = Date.now();
+  let changed = false;
+
+  for (const [key, task] of Object.entries(tasks)) {
+    if (!task || TERMINAL_STATES.has(task.state) || (queueId && task.queueId !== queueId)) {
+      continue;
+    }
+
+    const lastActiveAt = getTaskActivityAt(task);
+    if (!lastActiveAt || now - lastActiveAt < LOCAL_TASK_TIMEOUT_MS) {
+      continue;
+    }
+
+    tasks[key] = {
+      ...task,
+      state: "error",
+      error: "浏览器任务超时，已终止",
+      completedAt: now,
+      updatedAt: now
+    };
+    changed = true;
+  }
+
+  if (changed) {
+    await setTasks(tasks);
+  }
+}
+
+async function retryPendingResultReports() {
+  const tasks = await getTasks();
+  let changed = false;
+  for (const [key, task] of Object.entries(tasks)) {
+    if (!task?.remoteTaskId || task.resultReported || !TERMINAL_STATES.has(task.state)) {
+      continue;
+    }
+    try {
+      await reportRemoteResult(task);
+      delete tasks[key];
+      changed = true;
+      if (task.state !== "error") {
+        await chrome.tabs.update(Number(key), { url: HOME_URL, active: true }).catch(() => {});
+      }
+    } catch (error) {
+      await chrome.storage.local.set({
+        remoteTaskMonitorLastError: error.message,
+        remoteTaskMonitorLastErrorAt: Date.now()
+      });
+    }
+  }
+  if (changed) {
+    await setTasks(tasks);
+  }
 }
 
 async function checkRemoteTasks(options = {}) {
@@ -553,6 +646,8 @@ async function checkRemoteTasks(options = {}) {
 
   const config = await getRemoteConfigForWindow(options.windowId);
   const nextCheckAt = Date.now() + POLL_INTERVAL_MS;
+  await releaseStaleLocalTasks(config.queueId);
+  await retryPendingResultReports();
   if (!config.enabled || !config.apiBaseUrl || await hasRunningTask(config.queueId)) {
     const result = { started: false, reason: "not_ready", nextCheckAt };
     await setMonitorStatus({
@@ -730,7 +825,23 @@ async function startOriginalPost({ tabId, originalText, imageAssetPath, imageFil
 
 async function clearAutoLike(tabId) {
   const tasks = await getTasks();
-  delete tasks[String(tabId)];
+  const key = String(tabId);
+  const task = tasks[key];
+  if (!task) {
+    return;
+  }
+
+  if (task.remoteTaskId && !TERMINAL_STATES.has(task.state)) {
+    tasks[key] = {
+      ...task,
+      state: "error",
+      error: "任务页面已关闭，任务已终止",
+      completedAt: Date.now(),
+      updatedAt: Date.now()
+    };
+  } else {
+    delete tasks[key];
+  }
   await setTasks(tasks);
 }
 
@@ -748,25 +859,30 @@ async function updateTaskState(tabId, patch) {
   tasks[key] = nextTask;
   await setTasks(tasks);
 
-  if (TERMINAL_STATES.has(nextTask.state) && nextTask.remoteTaskId && !nextTask.resultReported) {
-    const reportedTask = {
-      ...nextTask,
-      resultReported: true
-    };
-    tasks[key] = reportedTask;
-    await setTasks(tasks);
+  if (!TERMINAL_STATES.has(nextTask.state) && nextTask.remoteTaskId) {
     try {
-      await reportRemoteResult(reportedTask);
+      await reportRemoteProgress(nextTask);
     } catch (error) {
       await chrome.storage.local.set({
         remoteTaskMonitorLastError: error.message,
         remoteTaskMonitorLastErrorAt: Date.now()
       });
     }
-    delete tasks[key];
-    await setTasks(tasks);
-    if (nextTask.state !== "error") {
-      await chrome.tabs.update(Number(tabId), { url: HOME_URL, active: true });
+  }
+
+  if (TERMINAL_STATES.has(nextTask.state) && nextTask.remoteTaskId && !nextTask.resultReported) {
+    try {
+      await reportRemoteResult(nextTask);
+      delete tasks[key];
+      await setTasks(tasks);
+      if (nextTask.state !== "error") {
+        await chrome.tabs.update(Number(tabId), { url: HOME_URL, active: true });
+      }
+    } catch (error) {
+      await chrome.storage.local.set({
+        remoteTaskMonitorLastError: error.message,
+        remoteTaskMonitorLastErrorAt: Date.now()
+      });
     }
   }
 }

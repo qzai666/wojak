@@ -5,6 +5,13 @@ let remoteConfig = {
 };
 
 let queues = [{ id: "default", name: "默认队列" }];
+let currentQueueTaskCount = 0;
+let lastQueueTaskCountFetchAt = 0;
+
+const DEFAULT_QUEUE_ID = "default";
+const LAST_TARGET_ACTION_AT_KEY = "remoteTaskMonitorLastTargetActionAt";
+const QUEUE_TASK_COUNT_CACHE_MS = 5000;
+const TERMINAL_TASK_STATES = new Set(["replied", "spam_reply", "already_replied", "error", "done"]);
 
 const $ = (id) => document.getElementById(id);
 
@@ -24,6 +31,10 @@ function setMonitorStatus(text, stateName = "") {
   const status = $("monitorStatus");
   status.textContent = text;
   status.dataset.state = stateName;
+}
+
+function setQueueHint(text) {
+  $("queueHint").textContent = text;
 }
 
 function formatSeconds(ms) {
@@ -53,6 +64,18 @@ function normalizeLocalApiBaseUrl(value) {
   return rawValue;
 }
 
+function actionStorageKey(baseKey, queueId) {
+  return `${baseKey}:${queueId || DEFAULT_QUEUE_ID}`;
+}
+
+function actionIntervalStorageKey(key) {
+  return `${key}:intervalMs`;
+}
+
+function getCurrentQueueId() {
+  return $("queueId")?.value || remoteConfig.queueId || DEFAULT_QUEUE_ID;
+}
+
 function renderQueues() {
   const selectedQueueId = remoteConfig.queueId || "default";
   $("queueId").innerHTML = queues.map((queue) => {
@@ -60,6 +83,96 @@ function renderQueues() {
     return `<option value="${escapeHtml(queue.id)}">${escapeHtml(queue.name)}${stateText}</option>`;
   }).join("");
   $("queueId").value = queues.some((queue) => queue.id === selectedQueueId) ? selectedQueueId : queues[0]?.id || "default";
+}
+
+async function fetchCurrentQueueTaskCount(force = false) {
+  const now = Date.now();
+  if (!force && now - lastQueueTaskCountFetchAt < QUEUE_TASK_COUNT_CACHE_MS) {
+    return currentQueueTaskCount;
+  }
+
+  const apiBaseUrl = normalizeLocalApiBaseUrl($("remoteApiBaseUrl").value) || remoteConfig.apiBaseUrl || "http://127.0.0.1:8787";
+  if (!apiBaseUrl) {
+    currentQueueTaskCount = 0;
+    lastQueueTaskCountFetchAt = now;
+    return currentQueueTaskCount;
+  }
+
+  try {
+    const url = new URL(`${apiBaseUrl}/api/wojak/tasks`);
+    url.searchParams.set("queueId", getCurrentQueueId());
+    const response = await fetch(url.toString());
+    if (!response.ok) {
+      throw new Error(`任务读取失败：${response.status}`);
+    }
+    const payload = await response.json();
+    currentQueueTaskCount = (payload.tasks || []).filter((task) => !TERMINAL_TASK_STATES.has(task.state)).length;
+  } catch {
+    currentQueueTaskCount = 0;
+  }
+
+  lastQueueTaskCountFetchAt = now;
+  return currentQueueTaskCount;
+}
+
+async function fetchCurrentQueueActiveLocalTaskCount() {
+  try {
+    const stored = await chrome.storage.local.get("autoLikeTasks");
+    const tasks = stored.autoLikeTasks || {};
+    return Object.values(tasks).filter((task) => {
+      return task && task.queueId === getCurrentQueueId() && !TERMINAL_TASK_STATES.has(task.state);
+    }).length;
+  } catch {
+    return 0;
+  }
+}
+
+async function getCurrentQueueWaitSeconds() {
+  const queueId = getCurrentQueueId();
+  const targetActionKey = actionStorageKey(LAST_TARGET_ACTION_AT_KEY, queueId);
+  const stored = await chrome.storage.local.get([targetActionKey, actionIntervalStorageKey(targetActionKey)]);
+  const lastActionAt = Number(stored[targetActionKey]) || 0;
+  const intervalMs = Number(stored[actionIntervalStorageKey(targetActionKey)]) || 0;
+  if (!lastActionAt || !intervalMs) {
+    return 0;
+  }
+  return Math.max(0, Math.ceil((intervalMs - (Date.now() - lastActionAt)) / 1000));
+}
+
+function getNextCheckSeconds(status = null) {
+  if (!status?.nextCheckAt) {
+    return 0;
+  }
+  return Math.max(0, Math.ceil((status.nextCheckAt - Date.now()) / 1000));
+}
+
+async function refreshQueueHint(status = null, force = false) {
+  const taskCount = await fetchCurrentQueueTaskCount(force);
+  const activeLocalTaskCount = await fetchCurrentQueueActiveLocalTaskCount();
+  const waitSeconds = await getCurrentQueueWaitSeconds();
+  const nextCheckSeconds = getNextCheckSeconds(status);
+
+  if (!taskCount) {
+    setQueueHint("检测当前队列有0个任务，暂无待执行任务");
+    return;
+  }
+
+  if (activeLocalTaskCount > 0) {
+    setQueueHint(`检测当前队列有${taskCount}个任务，当前有${activeLocalTaskCount}个任务执行中`);
+    return;
+  }
+
+  if (waitSeconds > 0) {
+    setQueueHint(`检测当前队列有${taskCount}个任务，还有${waitSeconds}s开始执行任务队列`);
+    return;
+  }
+
+  if (nextCheckSeconds > 0) {
+    setQueueHint(`检测当前队列有${taskCount}个任务，还有${nextCheckSeconds}s开始执行任务队列`);
+    return;
+  }
+
+  setQueueHint(`检测当前队列有${taskCount}个任务，等待调度执行`);
 }
 
 async function refreshQueues() {
@@ -75,6 +188,7 @@ async function refreshQueues() {
     queues = queues.length ? queues : [{ id: "default", name: "默认队列" }];
   }
   renderQueues();
+  await refreshQueueHint(null, true);
 }
 
 function renderListenState() {
@@ -160,7 +274,9 @@ async function refreshRemoteConfig() {
   renderListenState();
   if (remoteConfig.enabled) {
     await checkRemoteTasks();
+    return;
   }
+  await refreshQueueHint(null, true);
 }
 
 async function checkRemoteTasks() {
@@ -205,12 +321,14 @@ async function checkRemoteTasks() {
 async function refreshMonitorStatus() {
   if (!remoteConfig.enabled) {
     setMonitorStatus("监听未启动");
+    await refreshQueueHint();
     return;
   }
 
   const response = await chrome.runtime.sendMessage({ type: "GET_REMOTE_MONITOR_STATUS" });
   if (!response?.ok) {
     setMonitorStatus(response?.error || "监听状态读取失败", "error");
+    await refreshQueueHint();
     return;
   }
 
@@ -220,6 +338,7 @@ async function refreshMonitorStatus() {
     ? `；三连间隔剩余：${formatSeconds(status.waitMs - Math.max(0, Date.now() - (status.updatedAt || Date.now())))}`
     : "";
   setMonitorStatus(`${checkText}${waitText}`, status.state || "watching");
+  await refreshQueueHint(status);
 }
 
 async function toggleListening() {
@@ -255,11 +374,13 @@ async function toggleListening() {
   };
   renderListenState();
   await refreshMonitorStatus();
+  await refreshQueueHint(null, true);
 }
 
 async function updateQueueBinding() {
   if (!remoteConfig.enabled) {
     remoteConfig.queueId = $("queueId").value;
+    await refreshQueueHint(null, true);
     return;
   }
 
@@ -288,6 +409,7 @@ async function updateQueueBinding() {
   };
   renderQueues();
   await refreshMonitorStatus();
+  await refreshQueueHint(null, true);
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -297,6 +419,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   await refreshRemoteConfig();
   await refreshAutoLikeStatus();
   await refreshMonitorStatus();
+  await refreshQueueHint(null, true);
   setInterval(refreshAutoLikeStatus, 1000);
   setInterval(refreshMonitorStatus, 1000);
 });
