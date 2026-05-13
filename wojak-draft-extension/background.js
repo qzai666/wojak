@@ -533,6 +533,26 @@ async function hasPendingRemoteTask(config) {
   };
 }
 
+// 没有可立即执行的目标任务时，继续保持首页滚动；点赞仍然走独立的空闲间隔。
+async function runIdleBrowse(windowId, queueId) {
+  const idleActionKey = actionStorageKey(LAST_IDLE_ACTION_AT_KEY, queueId);
+  if (!await canStartAction(idleActionKey, IDLE_ACTION_INTERVAL_MS)) {
+    const idleResult = await browseHome({ shouldLike: false, windowId, queueId });
+    return {
+      idleResult,
+      idleState: "idle_scrolled",
+      idleMessage: "已执行首页滚动浏览"
+    };
+  }
+
+  const idleResult = await browseHome({ shouldLike: true, windowId, queueId });
+  return {
+    idleResult,
+    idleState: "idle_liked",
+    idleMessage: "已执行首页随机点赞"
+  };
+}
+
 async function reportRemoteProgress(task) {
   const config = await getRemoteConfig();
   if (!config.apiBaseUrl || !task.remoteTaskId || TERMINAL_STATES.has(task.state)) {
@@ -672,23 +692,11 @@ async function checkRemoteTasks(options = {}) {
   const hasPendingTask = pendingState.hasPendingTask;
   const isTestMode = Boolean(pendingState.queue?.testMode);
   if (!hasPendingTask) {
-    const idleActionKey = actionStorageKey(LAST_IDLE_ACTION_AT_KEY, config.queueId);
-    if (!await canStartAction(idleActionKey, IDLE_ACTION_INTERVAL_MS)) {
-      const idleResult = await browseHome({ shouldLike: false, windowId: options.windowId, queueId: config.queueId });
-      const result = { started: false, reason: "idle_scrolled", idleResult, nextCheckAt };
-      await setMonitorStatus({
-        state: "idle_scrolled",
-        message: "没有新链接，已执行首页滚动浏览",
-        nextCheckAt
-      });
-      return result;
-    }
-
-    const idleResult = await browseHome({ shouldLike: true, windowId: options.windowId, queueId: config.queueId });
-    const result = { started: false, idle: true, idleResult, nextCheckAt };
+    const idleBrowse = await runIdleBrowse(options.windowId, config.queueId);
+    const result = { started: false, reason: idleBrowse.idleState, idleResult: idleBrowse.idleResult, nextCheckAt };
     await setMonitorStatus({
-      state: "idle_liked",
-      message: "没有新链接，已执行首页随机点赞",
+      state: idleBrowse.idleState,
+      message: `没有新链接，${idleBrowse.idleMessage}`,
       nextCheckAt
     });
     return result;
@@ -697,10 +705,11 @@ async function checkRemoteTasks(options = {}) {
   const targetActionKey = actionStorageKey(LAST_TARGET_ACTION_AT_KEY, config.queueId);
   if (!isTestMode && !await canStartAction(targetActionKey, TARGET_ACTION_INTERVAL_MIN_MS)) {
     const waitMs = await getActionWaitMs(targetActionKey, TARGET_ACTION_INTERVAL_MIN_MS);
+    const idleBrowse = await runIdleBrowse(options.windowId, config.queueId);
     const result = { started: false, reason: "waiting_target_interval", waitMs, nextCheckAt };
     await setMonitorStatus({
       state: "waiting_target_interval",
-      message: "监听中，等待目标任务随机间隔结束",
+      message: `监听中，等待目标任务随机间隔结束；期间${idleBrowse.idleMessage}`,
       waitMs,
       nextCheckAt
     });

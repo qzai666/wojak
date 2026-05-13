@@ -812,7 +812,7 @@ async function ensureLiked(article) {
 
   if (like.liked) {
     await reportState({ state: "already_liked" });
-    return;
+    return true;
   }
 
   await reportState({ state: "liking" });
