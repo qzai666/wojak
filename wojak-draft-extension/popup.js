@@ -139,18 +139,19 @@ async function getCurrentQueueWaitSeconds() {
   return Math.max(0, Math.ceil((intervalMs - (Date.now() - lastActionAt)) / 1000));
 }
 
-function getNextCheckSeconds(status = null) {
-  if (!status?.nextCheckAt) {
+function getStatusWaitSeconds(status = null) {
+  if (status?.state !== "waiting_target_interval" || !status.waitMs) {
     return 0;
   }
-  return Math.max(0, Math.ceil((status.nextCheckAt - Date.now()) / 1000));
+  return Math.max(0, Math.ceil((status.waitMs - Math.max(0, Date.now() - (status.updatedAt || Date.now()))) / 1000));
 }
 
 async function refreshQueueHint(status = null, force = false) {
   const taskCount = await fetchCurrentQueueTaskCount(force);
   const activeLocalTaskCount = await fetchCurrentQueueActiveLocalTaskCount();
-  const waitSeconds = await getCurrentQueueWaitSeconds();
-  const nextCheckSeconds = getNextCheckSeconds(status);
+  const statusWaitSeconds = getStatusWaitSeconds(status);
+  const storedWaitSeconds = await getCurrentQueueWaitSeconds();
+  const waitSeconds = statusWaitSeconds > 0 ? statusWaitSeconds : storedWaitSeconds;
 
   if (!taskCount) {
     setQueueHint("检测当前队列有0个任务，暂无待执行任务");
@@ -167,8 +168,8 @@ async function refreshQueueHint(status = null, force = false) {
     return;
   }
 
-  if (nextCheckSeconds > 0) {
-    setQueueHint(`检测当前队列有${taskCount}个任务，还有${nextCheckSeconds}s开始执行任务队列`);
+  if (status?.state === "waiting_target_interval") {
+    setQueueHint(`检测当前队列有${taskCount}个任务，随机间隔已结束，等待下次监听检查执行`);
     return;
   }
 
