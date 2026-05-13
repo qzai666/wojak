@@ -6,6 +6,8 @@ const UPLOAD_WAIT_MS = 15000;
 const REPLY_PUBLISH_WAIT_MS = 5000;
 const REPLY_MODAL_CHECK_MS = 2000;
 const REPLY_DIALOG_WAIT_MS = 10000;
+const REPLY_RECOVER_WAIT_MS = 10000;
+const REPLY_RETRY_LIMIT = 3;
 
 let autoLikeTimer = null;
 let autoLikeTask = null;
@@ -251,7 +253,7 @@ function findReplyTextbox() {
 }
 
 function findReplyActionButton(article) {
-  const button = article?.querySelector('button[data-testid="reply"], [data-testid="reply"]');
+  const button = article?.querySelector('button[data-testid="reply"]');
   return button && isVisible(button) ? button : null;
 }
 
@@ -741,20 +743,49 @@ async function waitForEnabledButton(root) {
   return button;
 }
 
-async function clickTweetButtonAndWait(root, commentText, beforeStatusIds, targetStatusId) {
-  const button = await waitForCondition(() => {
+async function closeReplyDialog(dialog) {
+  const root = dialog && document.contains(dialog) ? dialog : findReplyDialog();
+  const closeButton = root?.querySelector('button[data-testid="app-bar-close"]');
+  if (closeButton && isVisible(closeButton)) {
+    closeButton.click();
+  }
+}
+
+async function recoverReplyDialog(dialog) {
+  await closeReplyDialog(dialog);
+  await delay(1000);
+
+  const confirmationDialog = document.querySelector('div[data-testid="confirmationSheetDialog"]');
+  const cancelButton = confirmationDialog?.querySelector('button[data-testid="confirmationSheetCancel"]');
+  if (cancelButton && isVisible(cancelButton)) {
+    cancelButton.click();
+  }
+  await delay(1000);
+}
+
+async function waitForReplySubmitButton(root) {
+  return waitForCondition(() => {
     const submitButton = findReplySubmitButton(root);
     return isButtonEnabled(submitButton) ? submitButton : null;
-  }, UPLOAD_WAIT_MS + 10000, SHORT_WAIT_MS);
+  }, REPLY_RECOVER_WAIT_MS, SHORT_WAIT_MS);
+}
+
+async function waitForReplyDialogClosed() {
+  return waitForCondition(() => !hasReplyDialog(), REPLY_RECOVER_WAIT_MS, REPLY_MODAL_CHECK_MS);
+}
+
+async function clickTweetButtonAndWait(root, commentText, beforeStatusIds, targetStatusId) {
+  const button = await waitForReplySubmitButton(root);
   if (!button) {
-    throw new Error("Reply button did not become enabled");
+    return { ok: false, reason: "reply_button_timeout" };
   }
+
   button.scrollIntoView({ block: "center" });
   button.click();
 
-  // 发布后只看回复弹窗是否还在；弹窗未消失前不开始抓链接，也不跳页面。
-  while (hasReplyDialog()) {
-    await delay(REPLY_MODAL_CHECK_MS);
+  const dialogClosed = await waitForReplyDialogClosed();
+  if (!dialogClosed) {
+    return { ok: false, reason: "reply_dialog_stuck" };
   }
 
   const replyUrl = await waitForCondition(() => findReplyUrl(commentText, beforeStatusIds, targetStatusId), REPLY_PUBLISH_WAIT_MS, 500);
@@ -888,57 +919,75 @@ async function publishReply(task) {
     throw new Error("Comment text is empty");
   }
 
-  await reportState({ state: "composing" });
-  const article = getTargetArticle(task);
-  if (!article) {
-    throw new Error("Target article not found");
-  }
-
-  const dialog = await openReplyDialog(article);
-  const draftBlock = findReplyDraftBlock(dialog);
-  if (!draftBlock) {
-    throw new Error("Reply draft block not found");
-  }
-  draftBlock.click();
-
-  const textbox = findDraftInputElement(draftBlock);
-  await ensureReplyText(textbox, commentText);
-  const root = dialog;
-
-  if (task.imageAssetPath) {
-    await reportState({ state: "uploading_image" });
-    const beforeMediaCount = mediaMarkerCount(root);
-    const uploadStarted = await attachImage(root, textbox, task);
-    if (!uploadStarted) {
-      throw new Error("Image upload input not found and paste fallback failed");
+  for (let attempt = 0; attempt < REPLY_RETRY_LIMIT; attempt += 1) {
+    await reportState({ state: "composing" });
+    const article = getTargetArticle(task);
+    if (!article) {
+      throw new Error("Target article not found");
     }
-    await reportState({ state: "waiting_image" });
-    await waitForImageAttachment(root, beforeMediaCount);
-  }
 
-  const beforeStatusIds = getVisibleStatusIds();
+    const dialog = await openReplyDialog(article);
+    const draftBlock = findReplyDraftBlock(dialog);
+    if (!draftBlock) {
+      throw new Error("Reply draft block not found");
+    }
+    draftBlock.click();
 
-  await reportState({ state: "publishing" });
-  const finalRoot = dialog;
-  await delay(5000);
-  const publishResult = await clickTweetButtonAndWait(finalRoot, commentText, beforeStatusIds, task.statusId);
-  const replyUrl = publishResult.replyUrl || "";
-  if (publishResult.state === "spam_reply") {
+    const textbox = findDraftInputElement(draftBlock);
+    await ensureReplyText(textbox, commentText);
+    const root = dialog;
+
+    if (task.imageAssetPath) {
+      await reportState({ state: "uploading_image" });
+      const beforeMediaCount = mediaMarkerCount(root);
+      const uploadStarted = await attachImage(root, textbox, task);
+      if (!uploadStarted) {
+        throw new Error("Image upload input not found and paste fallback failed");
+      }
+      await reportState({ state: "waiting_image" });
+      await waitForImageAttachment(root, beforeMediaCount);
+    }
+
+    const beforeStatusIds = getVisibleStatusIds();
+
+    await reportState({ state: "publishing" });
+    await delay(5000);
+    const publishResult = await clickTweetButtonAndWait(root, commentText, beforeStatusIds, task.statusId);
+    const replyUrl = publishResult.replyUrl || "";
+    if (publishResult.state === "spam_reply") {
+      await stopTask({
+        state: "spam_reply",
+        completedAt: Date.now(),
+        error: publishResult.error || "链接已被风控",
+        replyUrl: "",
+        commentedUrl: ""
+      });
+      return;
+    }
+    if (publishResult.state === "replied") {
+      await stopTask({
+        state: "replied",
+        completedAt: Date.now(),
+        replyUrl: replyUrl || "",
+        commentedUrl: replyUrl || ""
+      });
+      return;
+    }
+
+    if (attempt < REPLY_RETRY_LIMIT - 1) {
+      await recoverReplyDialog(dialog);
+      continue;
+    }
+
+    await closeReplyDialog(dialog);
+    location.assign("https://x.com/home");
     await stopTask({
-      state: "spam_reply",
-      completedAt: Date.now(),
-      error: publishResult.error || "链接已被风控",
-      replyUrl: "",
-      commentedUrl: ""
+      state: "error",
+      error: "网络问题",
+      completedAt: Date.now()
     });
     return;
   }
-  await stopTask({
-    state: "replied",
-    completedAt: Date.now(),
-    replyUrl: replyUrl || "",
-    commentedUrl: replyUrl || ""
-  });
 }
 
 async function refreshIfNeeded(task) {
