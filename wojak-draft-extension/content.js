@@ -824,10 +824,17 @@ async function ensureLiked(article) {
   }, 5000, 250);
 
   if (!liked) {
-    throw new Error("Like did not complete");
+    await stopTask({
+      state: "error",
+      error: "点赞未完成，已跳过当前任务",
+      completedAt: Date.now()
+    });
+    location.assign("https://x.com/home");
+    return false;
   }
 
   await reportState({ state: "liked" });
+  return true;
 }
 
 async function browseHome(options = {}) {
@@ -1080,7 +1087,10 @@ async function tickAutoLike() {
       return;
     }
 
-    await ensureLiked(article);
+    const liked = await ensureLiked(article);
+    if (!liked) {
+      return;
+    }
     await ensureReposted(article);
 
     await publishReply(autoLikeTask);

@@ -855,6 +855,26 @@ async function clearAutoLike(tabId) {
   await setTasks(tasks);
 }
 
+// 远程任务结束后立即再检查一次当前窗口队列，避免一直等到下一轮轮询。
+async function triggerNextRemoteTaskCheck(tabId, task) {
+  if (task?.source !== "remote") {
+    return;
+  }
+
+  try {
+    const tab = await chrome.tabs.get(Number(tabId));
+    if (!Number.isInteger(tab?.windowId)) {
+      return;
+    }
+    await checkRemoteTasks({ windowId: tab.windowId });
+  } catch (error) {
+    await chrome.storage.local.set({
+      remoteTaskMonitorLastError: error.message,
+      remoteTaskMonitorLastErrorAt: Date.now()
+    });
+  }
+}
+
 async function updateTaskState(tabId, patch) {
   const tasks = await getTasks();
   const key = String(tabId);
@@ -888,6 +908,7 @@ async function updateTaskState(tabId, patch) {
       if (nextTask.state !== "error") {
         await chrome.tabs.update(Number(tabId), { url: HOME_URL, active: true });
       }
+      await triggerNextRemoteTaskCheck(tabId, nextTask);
     } catch (error) {
       await chrome.storage.local.set({
         remoteTaskMonitorLastError: error.message,

@@ -122,6 +122,7 @@ function createTask(payload) {
     imageAssetPath: String(payload.imageAssetPath || "").trim(),
     imageFileName: String(payload.imageFileName || "").trim(),
     state: "pending",
+    copiedAt: "",
     createdAt: new Date().toISOString()
   };
 }
@@ -571,9 +572,18 @@ function renderHomePage() {
         return date.toLocaleString("zh-CN", { hour12: false });
       }
 
-      async function copyText(text, button) {
+      async function copyText(text, button, taskId) {
         if (!text) return;
         await navigator.clipboard.writeText(text);
+        const response = await fetch("/api/wojak/tasks/" + encodeURIComponent(taskId) + "/copied", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ copied: true })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.error || "复制状态保存失败");
+        }
         button.textContent = "已复制";
         button.classList.add("copied");
         button.disabled = true;
@@ -613,9 +623,10 @@ function renderHomePage() {
           const commentedUrl = result.originalUrl || result.commentedUrl || result.replyUrl || "";
           const isSpamReply = task.state === "spam_reply" || result.state === "spam_reply";
           const isOriginal = task.type === "original";
+          const isCopied = Boolean(task.copiedAt);
           const completedAt = result.completedAt || task.completedAt || "";
           const copyButton = commentedUrl
-            ? '<button class="copy-btn" type="button" data-copy="' + escapeHtml(commentedUrl) + '">复制</button>'
+            ? '<button class="copy-btn' + (isCopied ? ' copied' : '') + '" type="button" data-copy="' + escapeHtml(commentedUrl) + '" data-copy-task-id="' + escapeHtml(task.id) + '"' + (isCopied ? ' disabled' : '') + '>' + (isCopied ? '已复制' : '复制') + '</button>'
             : (isSpamReply ? '<span class="empty-link">可能的垃圾贴</span>' : '<span class="empty-link">等待评论完成</span>');
           const deleteButton = '<button class="copy-btn" type="button" data-delete-task-id="' + escapeHtml(task.id) + '">删除记录</button>';
           return '<tr>' +
@@ -752,7 +763,7 @@ function renderHomePage() {
       taskList.addEventListener("click", (event) => {
         const copyButton = event.target.closest("[data-copy]");
         if (copyButton) {
-          copyText(copyButton.dataset.copy, copyButton).catch((error) => setStatus(error.message, true));
+          copyText(copyButton.dataset.copy, copyButton, copyButton.dataset.copyTaskId).catch((error) => setStatus(error.message, true));
           return;
         }
 
@@ -1053,6 +1064,21 @@ const server = http.createServer(async (request, response) => {
         receivedAt: completedAt
       });
       sendJson(response, 200, { ok: true });
+      return;
+    }
+
+    const copiedMatch = url.pathname.match(/^\/api\/wojak\/tasks\/([^/]+)\/copied$/);
+    if (request.method === "PATCH" && copiedMatch) {
+      const payload = await readJson(request);
+      const task = tasks.find((item) => item.id === copiedMatch[1]);
+      if (!task) {
+        sendJson(response, 404, { error: "Task not found" });
+        return;
+      }
+
+      task.copiedAt = payload.copied === false ? "" : new Date().toISOString();
+      task.updatedAt = new Date().toISOString();
+      sendJson(response, 200, { ok: true, task });
       return;
     }
 
