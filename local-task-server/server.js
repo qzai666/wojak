@@ -9,6 +9,8 @@ const tasks = [];
 const results = [];
 const queues = [{ id: "default", name: "默认队列", enabled: true }];
 const COMMENTS_PATH = path.resolve(__dirname, "../comments.json");
+const ORIGINAL_PATH = path.resolve(__dirname, "../Original.json");
+const IMAGE_DIR = path.resolve(__dirname, "../image");
 const DEFAULT_QUEUE_ID = queues[0].id;
 
 function sendHtml(response, html) {
@@ -25,6 +27,23 @@ function sendJson(response, statusCode, payload) {
     "Cache-Control": "no-store"
   });
   response.end(JSON.stringify(payload));
+}
+
+function sendFile(response, filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const contentTypes = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp"
+  };
+  response.writeHead(200, {
+    "Content-Type": contentTypes[ext] || "application/octet-stream",
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*"
+  });
+  fs.createReadStream(filePath).pipe(response);
 }
 
 function readJson(request) {
@@ -78,9 +97,11 @@ function createQueue(payload) {
 function createTask(payload) {
   return {
     id: crypto.randomUUID(),
+    type: payload.type || "engagement",
     queueId: normalizeQueueId(payload.queueId),
     targetUrl: String(payload.targetUrl || payload.url || "").trim(),
     commentText: cleanCommentText(payload.commentText),
+    originalText: cleanCommentText(payload.originalText),
     imageAssetPath: String(payload.imageAssetPath || "").trim(),
     imageFileName: String(payload.imageFileName || "").trim(),
     state: "pending",
@@ -96,6 +117,22 @@ function loadRandomComment() {
   const comments = JSON.parse(fs.readFileSync(COMMENTS_PATH, "utf8"));
   const item = pick(comments);
   return cleanCommentText(item?.content);
+}
+
+function loadRandomOriginal() {
+  const originals = JSON.parse(fs.readFileSync(ORIGINAL_PATH, "utf8"));
+  const item = pick(originals);
+  return cleanCommentText(item?.content);
+}
+
+function loadRandomImageUrl(request) {
+  const files = fs.readdirSync(IMAGE_DIR).filter((file) => /\.(jpe?g|png|gif|webp)$/i.test(file));
+  const fileName = pick(files);
+  const origin = `http://${request.headers.host}`;
+  return {
+    imageAssetPath: `${origin}/image/${encodeURIComponent(fileName)}`,
+    imageFileName: fileName
+  };
 }
 
 function renderHomePage() {
@@ -243,6 +280,12 @@ function renderHomePage() {
         align-items: center;
       }
 
+      .table-title-wrap {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+
       .queue-tabs {
         display: flex;
         flex-wrap: wrap;
@@ -370,6 +413,18 @@ function renderHomePage() {
         background: rgba(245, 158, 11, 0.14);
       }
 
+      .task-tag {
+        display: inline-flex;
+        width: fit-content;
+        margin-bottom: 6px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        color: #fecaca;
+        background: rgba(239, 68, 68, 0.2);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
       .empty {
         padding: 18px 16px;
         color: #8b95a7;
@@ -418,7 +473,10 @@ function renderHomePage() {
 
       <section class="table-panel">
         <div class="table-header">
-          <h2 class="table-title">任务队列</h2>
+          <div class="table-title-wrap">
+            <h2 class="table-title">任务队列</h2>
+            <button id="createOriginalBtn" class="secondary" type="button">发原创贴</button>
+          </div>
           <div class="table-actions">
             <span id="taskCount" class="count">共 0 条</span>
             <button id="clearTasksBtn" class="secondary" type="button">清除日志</button>
@@ -434,6 +492,7 @@ function renderHomePage() {
       const taskList = document.getElementById("taskList");
       const taskCount = document.getElementById("taskCount");
       const clearTasksBtn = document.getElementById("clearTasksBtn");
+      const createOriginalBtn = document.getElementById("createOriginalBtn");
       const queueTabs = document.getElementById("queueTabs");
       const queueState = document.getElementById("queueState");
       const toggleQueueBtn = document.getElementById("toggleQueueBtn");
@@ -508,15 +567,16 @@ function renderHomePage() {
         const resultsByTaskId = new Map((payload.results || []).map((result) => [result.taskId, result]));
         const rows = tasks.slice().reverse().map((task) => {
           const result = resultsByTaskId.get(task.id) || {};
-          const commentedUrl = result.commentedUrl || result.replyUrl || "";
+          const commentedUrl = result.originalUrl || result.commentedUrl || result.replyUrl || "";
           const isSpamReply = task.state === "spam_reply" || result.state === "spam_reply";
+          const isOriginal = task.type === "original";
           const completedAt = result.completedAt || task.completedAt || "";
           const copyButton = commentedUrl
             ? '<button class="copy-btn" type="button" data-copy="' + escapeHtml(commentedUrl) + '">复制</button>'
             : (isSpamReply ? '<span class="empty-link">可能的垃圾贴</span>' : '<span class="empty-link">等待评论完成</span>');
           const deleteButton = '<button class="copy-btn" type="button" data-delete-task-id="' + escapeHtml(task.id) + '">删除记录</button>';
           return '<tr>' +
-            '<td><code>' + escapeHtml(task.targetUrl) + '</code></td>' +
+            '<td>' + (isOriginal ? '<span class="task-tag">原创贴</span>' : '') + '<code>' + escapeHtml(task.targetUrl || task.originalText || "") + '</code></td>' +
             '<td>' + (commentedUrl ? '<code>' + escapeHtml(commentedUrl) + '</code>' : (isSpamReply ? '<span class="empty-link">可能的垃圾贴</span>' : '<span class="empty-link">暂无</span>')) + '</td>' +
             '<td><span class="' + badgeClass(task.state) + '">' + escapeHtml(task.state) + '</span>' + (task.error ? '<div class="status error">' + escapeHtml(task.error) + '</div>' : '') + '</td>' +
             '<td>' + escapeHtml(formatTime(completedAt)) + '</td>' +
@@ -598,6 +658,34 @@ function renderHomePage() {
         }
         setStatus(result.queue.enabled ? "队列已启动。" : "队列已关闭。");
         await refreshTasks();
+      });
+
+      createOriginalBtn.addEventListener("click", async () => {
+        const current = queues.find((queue) => queue.id === activeQueueId);
+        if (current?.enabled === false) {
+          setStatus("当前队列已关闭，不能创建原创贴。", true);
+          return;
+        }
+
+        createOriginalBtn.disabled = true;
+        setStatus("正在加入原创贴任务...");
+        try {
+          const response = await fetch("/api/wojak/original-tasks", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ queueId: activeQueueId })
+          });
+          const result = await response.json();
+          if (!response.ok) {
+            throw new Error(result.error || "原创贴任务创建失败");
+          }
+          setStatus("原创贴任务已加入队列。");
+          await refreshTasks();
+        } catch (error) {
+          setStatus(error.message, true);
+        } finally {
+          createOriginalBtn.disabled = false;
+        }
       });
 
       taskList.addEventListener("click", (event) => {
@@ -705,6 +793,17 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    const imageMatch = decodeURIComponent(url.pathname).match(/^\/image\/([^/]+)$/);
+    if (request.method === "GET" && imageMatch) {
+      const filePath = path.resolve(IMAGE_DIR, imageMatch[1]);
+      if (!filePath.startsWith(IMAGE_DIR) || !fs.existsSync(filePath)) {
+        sendJson(response, 404, { error: "Image not found" });
+        return;
+      }
+      sendFile(response, filePath);
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/api/wojak/queues") {
       sendJson(response, 200, { queues, defaultQueueId: DEFAULT_QUEUE_ID });
       return;
@@ -787,6 +886,29 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/wojak/original-tasks") {
+      const payload = await readJson(request);
+      const queueId = normalizeQueueId(payload.queueId);
+      const queue = queues.find((item) => item.id === queueId);
+      if (queue?.enabled === false) {
+        sendJson(response, 400, { error: "当前队列已关闭" });
+        return;
+      }
+
+      const image = loadRandomImageUrl(request);
+      const task = createTask({
+        type: "original",
+        queueId,
+        targetUrl: "https://x.com/home",
+        originalText: loadRandomOriginal(),
+        imageAssetPath: image.imageAssetPath,
+        imageFileName: image.imageFileName
+      });
+      tasks.push(task);
+      sendJson(response, 201, { task });
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/api/wojak/tasks/next") {
       const queueId = normalizeQueueId(url.searchParams.get("queueId"));
       const queue = queues.find((item) => item.id === queueId);
@@ -801,8 +923,11 @@ const server = http.createServer(async (request, response) => {
         return;
       }
 
-      if (!task.commentText) {
+      if (task.type !== "original" && !task.commentText) {
         task.commentText = loadRandomComment();
+      }
+      if (task.type === "original" && !task.originalText) {
+        task.originalText = loadRandomOriginal();
       }
       task.state = "running";
       task.startedAt = new Date().toISOString();

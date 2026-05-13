@@ -224,7 +224,10 @@ async function fetchImageFile(task) {
     return null;
   }
 
-  const response = await fetch(chrome.runtime.getURL(task.imageAssetPath));
+  const imageUrl = /^https?:\/\//i.test(task.imageAssetPath)
+    ? task.imageAssetPath
+    : chrome.runtime.getURL(task.imageAssetPath);
+  const response = await fetch(imageUrl);
   if (!response.ok) {
     throw new Error(`Image load failed: ${task.imageAssetPath}`);
   }
@@ -254,10 +257,16 @@ function findReplyDialog() {
   return dialogs.find((dialog) => dialog.querySelector('[data-testid="tweetTextarea_0"]')) || null;
 }
 
+function findReplyComposerRoot() {
+  return findReplyDialog() || Array.from(document.querySelectorAll("article, main, [data-testid=\"cellInnerDiv\"]"))
+    .filter(isVisible)
+    .find((root) => root.querySelector('[data-testid="tweetTextarea_0"]')) || null;
+}
+
 async function openReplyDialog(article) {
-  const existingDialog = findReplyDialog();
-  if (existingDialog) {
-    return existingDialog;
+  const existingRoot = findReplyComposerRoot();
+  if (existingRoot) {
+    return existingRoot;
   }
 
   const replyButton = findReplyActionButton(article);
@@ -265,21 +274,23 @@ async function openReplyDialog(article) {
     throw new Error("Reply action button not found");
   }
 
+  replyButton.scrollIntoView({ block: "center" });
+  await delay(500);
   replyButton.click();
-  const dialog = await waitForCondition(findReplyDialog, 8000, 250);
-  if (!dialog) {
-    throw new Error("Reply dialog did not open");
+  const root = await waitForCondition(findReplyComposerRoot, 12000, 250);
+  if (!root) {
+    throw new Error("Reply composer did not open");
   }
-  return dialog;
+  return root;
 }
 
-function findDialogReplyTextbox(dialog) {
+function findDialogReplyTextbox(root) {
   const selectors = [
     '[data-testid="tweetTextarea_0"][contenteditable="true"]',
     '[data-testid="tweetTextarea_0"] [contenteditable="true"]',
     'div[role="textbox"][contenteditable="true"]'
   ];
-  const textboxes = selectors.flatMap((selector) => Array.from(dialog.querySelectorAll(selector)));
+  const textboxes = selectors.flatMap((selector) => Array.from(root.querySelectorAll(selector)));
   return textboxes.find((textbox) => isVisible(textbox) && textbox.getAttribute("aria-label") !== "Search query") || null;
 }
 
@@ -587,6 +598,84 @@ function findTweetSubmitButton(root) {
     return scopedButton;
   }
   return null;
+}
+
+function findHomePostTextbox() {
+  const boxes = Array.from(document.querySelectorAll('[data-testid="tweetTextarea_0"][contenteditable="true"], [data-testid="tweetTextarea_0"] [contenteditable="true"], div[role="textbox"][contenteditable="true"]'));
+  return boxes.find((box) => isVisible(box) && box.getAttribute("aria-label") !== "Search query") || null;
+}
+
+async function waitForHomeComposer() {
+  if (!location.pathname.startsWith("/home")) {
+    location.assign("https://x.com/home");
+    await waitForCondition(() => location.pathname.startsWith("/home") && isPageReady(), 10000, 500);
+  }
+  const textbox = await waitForCondition(findHomePostTextbox, 12000, 300);
+  if (!textbox) {
+    throw new Error("Home post textbox not found");
+  }
+  return textbox;
+}
+
+function findOriginalPostUrl(text, beforeStatusIds) {
+  const targetText = normalizeText(text);
+  const articles = Array.from(document.querySelectorAll("article"));
+  for (const article of articles) {
+    if (!normalizeText(article.textContent || "").includes(targetText)) {
+      continue;
+    }
+    const urls = getArticleStatusUrls(article);
+    const postUrl = urls.find((url) => {
+      const statusId = statusIdFromUrl(url);
+      return statusId && !beforeStatusIds.has(statusId);
+    }) || urls[0];
+    if (postUrl) {
+      return postUrl;
+    }
+  }
+  return "";
+}
+
+async function publishOriginalPost(task) {
+  const originalText = cleanCommentText(task.originalText);
+  if (!originalText) {
+    throw new Error("Original text is empty");
+  }
+
+  await reportState({ state: "composing" });
+  const textbox = await waitForHomeComposer();
+  await delay(1500);
+  await ensureReplyText(textbox, originalText);
+  const root = findComposerElement(textbox);
+
+  if (task.imageAssetPath) {
+    await reportState({ state: "uploading_image" });
+    const beforeMediaCount = mediaMarkerCount(root);
+    const uploadStarted = await attachImage(root, textbox, task);
+    if (!uploadStarted) {
+      throw new Error("Image upload input not found and paste fallback failed");
+    }
+    await reportState({ state: "waiting_image" });
+    await waitForImageAttachment(root, beforeMediaCount);
+  }
+
+  const beforeStatusIds = getVisibleStatusIds();
+  await reportState({ state: "publishing" });
+  await delay(5000);
+  if (!composerTextIncludes(textbox, originalText)) {
+    throw new Error("Original text is not present before publishing");
+  }
+  const button = await waitForEnabledButton(root);
+  button.click();
+
+  const originalUrl = await waitForCondition(() => findOriginalPostUrl(originalText, beforeStatusIds), 25000, 500);
+  await stopTask({
+    state: "replied",
+    completedAt: Date.now(),
+    originalUrl: originalUrl || "",
+    replyUrl: originalUrl || "",
+    commentedUrl: originalUrl || ""
+  });
 }
 
 function normalizeText(text) {
@@ -926,6 +1015,11 @@ async function tickAutoLike() {
   isTicking = true;
 
   try {
+    if (autoLikeTask.type === "original") {
+      await publishOriginalPost(autoLikeTask);
+      return;
+    }
+
     if (!isPostOpen(autoLikeTask)) {
       await refreshIfNeeded(autoLikeTask);
       return;

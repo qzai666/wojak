@@ -421,7 +421,20 @@ function remoteUrl(config, path) {
 
 function normalizeRemoteTask(remoteTask) {
   const imageAssetPath = remoteTask.imageAssetPath || pick(imageAssetPaths);
+  if (remoteTask.type === "original") {
+    return {
+      type: "original",
+      remoteTaskId: String(remoteTask.id || ""),
+      queueId: String(remoteTask.queueId || DEFAULT_QUEUE_ID),
+      targetUrl: HOME_URL,
+      originalText: cleanCommentText(remoteTask.originalText || remoteTask.commentText || ""),
+      imageAssetPath: remoteTask.imageAssetPath || "",
+      imageFileName: remoteTask.imageFileName || ""
+    };
+  }
+
   return {
+    type: "engagement",
     remoteTaskId: String(remoteTask.id || ""),
     queueId: String(remoteTask.queueId || DEFAULT_QUEUE_ID),
     targetUrl: remoteTask.targetUrl || remoteTask.url || "",
@@ -480,6 +493,7 @@ async function reportRemoteResult(task) {
       targetUrl: task.targetUrl,
       commentedUrl: task.commentedUrl || task.replyUrl || "",
       replyUrl: task.replyUrl || task.commentedUrl || "",
+      originalUrl: task.originalUrl || "",
       statusId: task.statusId,
       completedAt: new Date().toISOString()
     })
@@ -560,6 +574,27 @@ async function checkRemoteTasks(options = {}) {
   }
 
   const task = normalizeRemoteTask(remoteTask);
+  if (task.type === "original") {
+    if (!task.remoteTaskId || !task.originalText) {
+      throw new Error("Original task must include id and originalText");
+    }
+
+    const tab = await getOrCreateXTab(options.windowId);
+    await markActionStarted(targetActionKey);
+    const startedTask = await startOriginalPost({
+      tabId: tab.id,
+      ...task,
+      source: "remote"
+    });
+    const result = { started: true, task: startedTask, nextCheckAt };
+    await setMonitorStatus({
+      state: "started",
+      message: "已接收到原创贴任务，正在开始操作",
+      nextCheckAt
+    });
+    return result;
+  }
+
   if (!task.remoteTaskId || !task.targetUrl) {
     throw new Error("Remote task must include id and targetUrl");
   }
@@ -617,6 +652,37 @@ async function startAutoLike({ tabId, targetUrl, commentText, imageAssetPath, im
   return tasks[String(tabId)];
 }
 
+async function startOriginalPost({ tabId, originalText, imageAssetPath, imageFileName, remoteTaskId, queueId, source }) {
+  if (!tabId || !originalText) {
+    throw new Error("Missing tabId or originalText");
+  }
+
+  const tasks = await getTasks();
+  tasks[String(tabId)] = {
+    type: "original",
+    targetUrl: HOME_URL,
+    originalText: cleanCommentText(originalText),
+    imageAssetPath: imageAssetPath || "",
+    imageFileName: imageFileName || "",
+    remoteTaskId: remoteTaskId || "",
+    queueId: queueId || DEFAULT_QUEUE_ID,
+    source: source || "manual",
+    startedAt: Date.now(),
+    state: "opening"
+  };
+  await setTasks(tasks);
+
+  const tab = await chrome.tabs.get(tabId);
+  if (tab.url === HOME_URL) {
+    await chrome.tabs.reload(tabId);
+    await chrome.tabs.update(tabId, { active: true });
+  } else {
+    await chrome.tabs.update(tabId, { url: HOME_URL, active: true });
+  }
+
+  return tasks[String(tabId)];
+}
+
 async function clearAutoLike(tabId) {
   const tasks = await getTasks();
   delete tasks[String(tabId)];
@@ -654,7 +720,9 @@ async function updateTaskState(tabId, patch) {
     }
     delete tasks[key];
     await setTasks(tasks);
-    await chrome.tabs.update(Number(tabId), { url: HOME_URL, active: true });
+    if (nextTask.state !== "error") {
+      await chrome.tabs.update(Number(tabId), { url: HOME_URL, active: true });
+    }
   }
 }
 
