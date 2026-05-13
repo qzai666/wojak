@@ -3,6 +3,9 @@ const TARGET_LOAD_TIMEOUT_MS = 5000;
 const MAX_TARGET_REFRESH_COUNT = 3;
 const SHORT_WAIT_MS = 500;
 const UPLOAD_WAIT_MS = 15000;
+const REPLY_PUBLISH_WAIT_MS = 5000;
+const REPLY_MODAL_CHECK_MS = 2000;
+const REPLY_DIALOG_WAIT_MS = 10000;
 
 let autoLikeTimer = null;
 let autoLikeTask = null;
@@ -253,22 +256,15 @@ function findReplyActionButton(article) {
 }
 
 function findReplyDialog() {
-  const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(isVisible);
-  return dialogs.find((dialog) => dialog.querySelector('[data-testid="tweetTextarea_0"]')) || null;
+  const dialogs = Array.from(document.querySelectorAll('div[role="dialog"][aria-labelledby="modal-header"], div[aria-labelledby="modal-header"]')).filter(isVisible);
+  return dialogs.find((dialog) => dialog.querySelector(".public-DraftStyleDefault-block")) || null;
 }
 
-function findReplyComposerRoot() {
-  return findReplyDialog() || Array.from(document.querySelectorAll("article, main, [data-testid=\"cellInnerDiv\"]"))
-    .filter(isVisible)
-    .find((root) => root.querySelector('[data-testid="tweetTextarea_0"]')) || null;
+function hasReplyDialog() {
+  return Boolean(Array.from(document.querySelectorAll('div[role="dialog"][aria-labelledby="modal-header"], div[aria-labelledby="modal-header"]')).find(isVisible));
 }
 
 async function openReplyDialog(article) {
-  const existingRoot = findReplyComposerRoot();
-  if (existingRoot) {
-    return existingRoot;
-  }
-
   const replyButton = findReplyActionButton(article);
   if (!replyButton) {
     throw new Error("Reply action button not found");
@@ -277,21 +273,19 @@ async function openReplyDialog(article) {
   replyButton.scrollIntoView({ block: "center" });
   await delay(500);
   replyButton.click();
-  const root = await waitForCondition(findReplyComposerRoot, 12000, 250);
+  const root = await waitForCondition(findReplyDialog, REPLY_DIALOG_WAIT_MS, 250);
   if (!root) {
     throw new Error("Reply composer did not open");
   }
   return root;
 }
 
-function findDialogReplyTextbox(root) {
-  const selectors = [
-    '[data-testid="tweetTextarea_0"][contenteditable="true"]',
-    '[data-testid="tweetTextarea_0"] [contenteditable="true"]',
-    'div[role="textbox"][contenteditable="true"]'
-  ];
-  const textboxes = selectors.flatMap((selector) => Array.from(root.querySelectorAll(selector)));
-  return textboxes.find((textbox) => isVisible(textbox) && textbox.getAttribute("aria-label") !== "Search query") || null;
+function findReplyDraftBlock(root) {
+  return Array.from(root.querySelectorAll(".public-DraftStyleDefault-block")).find(isVisible) || null;
+}
+
+function findDraftInputElement(draftBlock) {
+  return draftBlock?.closest('[contenteditable="true"]') || draftBlock;
 }
 
 function placeCursorAtEnd(element) {
@@ -600,6 +594,10 @@ function findTweetSubmitButton(root) {
   return null;
 }
 
+function findReplySubmitButton(root) {
+  return root.querySelector('button[data-testid="tweetButton"]');
+}
+
 function findHomePostTextbox() {
   const boxes = Array.from(document.querySelectorAll('[data-testid="tweetTextarea_0"][contenteditable="true"], [data-testid="tweetTextarea_0"] [contenteditable="true"], div[role="textbox"][contenteditable="true"]'));
   return boxes.find((box) => isVisible(box) && box.getAttribute("aria-label") !== "Search query") || null;
@@ -727,18 +725,6 @@ function findReplyUrl(commentText, beforeStatusIds, targetStatusId) {
   return "";
 }
 
-function hasExistingReply(commentText) {
-  const target = normalizeText(commentText);
-  if (!target) {
-    return false;
-  }
-
-  return Array.from(document.querySelectorAll("article")).some((article) => {
-    const text = normalizeText(article.textContent || "");
-    return text.includes(target);
-  });
-}
-
 async function waitForEnabledButton(root) {
   const deadline = Date.now() + UPLOAD_WAIT_MS + 10000;
   let button = findTweetSubmitButton(root);
@@ -756,30 +742,28 @@ async function waitForEnabledButton(root) {
 }
 
 async function clickTweetButtonAndWait(root, commentText, beforeStatusIds, targetStatusId) {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const button = await waitForEnabledButton(root);
-    button.scrollIntoView({ block: "center" });
-    button.click();
+  const button = await waitForCondition(() => {
+    const submitButton = findReplySubmitButton(root);
+    return isButtonEnabled(submitButton) ? submitButton : null;
+  }, UPLOAD_WAIT_MS + 10000, SHORT_WAIT_MS);
+  if (!button) {
+    throw new Error("Reply button did not become enabled");
+  }
+  button.scrollIntoView({ block: "center" });
+  button.click();
 
-    const result = await waitForCondition(() => {
-      const replyUrl = findReplyUrl(commentText, beforeStatusIds, targetStatusId);
-      if (replyUrl) {
-        return { ok: true, state: "replied", replyUrl };
-      }
-      if (!isVisible(root)) {
-        return { ok: true, state: "spam_reply", replyUrl: "" };
-      }
-      return null;
-    }, 8000, 500);
-
-    if (result?.ok) {
-      return result;
-    }
-
-    await delay(1500);
+  // 发布后只看回复弹窗是否还在；弹窗未消失前不开始抓链接，也不跳页面。
+  while (hasReplyDialog()) {
+    await delay(REPLY_MODAL_CHECK_MS);
   }
 
-  throw new Error("Reply dialog stayed open after sending");
+  const replyUrl = await waitForCondition(() => findReplyUrl(commentText, beforeStatusIds, targetStatusId), REPLY_PUBLISH_WAIT_MS, 500);
+  if (replyUrl) {
+    return { ok: true, state: "replied", replyUrl };
+  }
+
+  location.assign("https://x.com/home");
+  return { ok: true, state: "spam_reply", replyUrl: "", error: "链接已被风控" };
 }
 
 async function ensureLiked(article) {
@@ -904,11 +888,6 @@ async function publishReply(task) {
     throw new Error("Comment text is empty");
   }
 
-  if (hasExistingReply(commentText)) {
-    await stopTask({ state: "already_replied", completedAt: Date.now() });
-    return;
-  }
-
   await reportState({ state: "composing" });
   const article = getTargetArticle(task);
   if (!article) {
@@ -916,12 +895,13 @@ async function publishReply(task) {
   }
 
   const dialog = await openReplyDialog(article);
-  await delay(3000);
-  const textbox = findDialogReplyTextbox(dialog);
-  if (!textbox) {
-    throw new Error("Reply textbox not found");
+  const draftBlock = findReplyDraftBlock(dialog);
+  if (!draftBlock) {
+    throw new Error("Reply draft block not found");
   }
+  draftBlock.click();
 
+  const textbox = findDraftInputElement(draftBlock);
   await ensureReplyText(textbox, commentText);
   const root = dialog;
 
@@ -937,20 +917,17 @@ async function publishReply(task) {
   }
 
   const beforeStatusIds = getVisibleStatusIds();
-  const finalTextbox = textbox;
 
   await reportState({ state: "publishing" });
   const finalRoot = dialog;
   await delay(5000);
-  if (!composerTextIncludes(finalTextbox, commentText)) {
-    throw new Error("Reply text is not present before publishing");
-  }
   const publishResult = await clickTweetButtonAndWait(finalRoot, commentText, beforeStatusIds, task.statusId);
   const replyUrl = publishResult.replyUrl || "";
   if (publishResult.state === "spam_reply") {
     await stopTask({
       state: "spam_reply",
       completedAt: Date.now(),
+      error: publishResult.error || "链接已被风控",
       replyUrl: "",
       commentedUrl: ""
     });

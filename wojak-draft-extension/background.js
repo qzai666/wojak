@@ -102,6 +102,20 @@ function cleanCommentText(text) {
     .trim();
 }
 
+function normalizeLocalApiBaseUrl(value) {
+  const rawValue = String(value || "").trim().replace(/\/+$/, "");
+  try {
+    const url = new URL(rawValue);
+    if (url.protocol === "http:" && url.hostname === "localhost") {
+      url.hostname = "127.0.0.1";
+      return url.toString().replace(/\/+$/, "");
+    }
+  } catch {
+    return rawValue;
+  }
+  return rawValue;
+}
+
 function actionStorageKey(baseKey, queueId) {
   return `${baseKey}:${queueId || DEFAULT_QUEUE_ID}`;
 }
@@ -163,7 +177,7 @@ async function getRemoteConfigForWindow(windowId = null) {
 async function setRemoteConfig(config) {
   const nextConfig = {
     enabled: Number.isInteger(config.windowId) ? false : Boolean(config.enabled),
-    apiBaseUrl: String(config.apiBaseUrl || "").trim().replace(/\/+$/, ""),
+    apiBaseUrl: normalizeLocalApiBaseUrl(config.apiBaseUrl),
     queueId: String(config.queueId || DEFAULT_QUEUE_ID),
     pollMinutes: ACTION_INTERVAL_MINUTES
   };

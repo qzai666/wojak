@@ -39,6 +39,20 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function normalizeLocalApiBaseUrl(value) {
+  const rawValue = String(value || "").trim().replace(/\/+$/, "");
+  try {
+    const url = new URL(rawValue);
+    if (url.protocol === "http:" && url.hostname === "localhost") {
+      url.hostname = "127.0.0.1";
+      return url.toString().replace(/\/+$/, "");
+    }
+  } catch {
+    return rawValue;
+  }
+  return rawValue;
+}
+
 function renderQueues() {
   const selectedQueueId = remoteConfig.queueId || "default";
   $("queueId").innerHTML = queues.map((queue) => {
@@ -49,7 +63,7 @@ function renderQueues() {
 }
 
 async function refreshQueues() {
-  const apiBaseUrl = $("remoteApiBaseUrl").value.trim().replace(/\/+$/, "") || remoteConfig.apiBaseUrl || "http://127.0.0.1:8787";
+  const apiBaseUrl = normalizeLocalApiBaseUrl($("remoteApiBaseUrl").value) || remoteConfig.apiBaseUrl || "http://127.0.0.1:8787";
   try {
     const response = await fetch(`${apiBaseUrl}/api/wojak/queues`);
     if (!response.ok) {
@@ -210,7 +224,7 @@ async function refreshMonitorStatus() {
 
 async function toggleListening() {
   const nextEnabled = !remoteConfig.enabled;
-  const apiBaseUrl = $("remoteApiBaseUrl").value.trim();
+  const apiBaseUrl = normalizeLocalApiBaseUrl($("remoteApiBaseUrl").value);
   const queueId = $("queueId").value;
   const window = await chrome.windows.getCurrent();
 
@@ -250,7 +264,7 @@ async function updateQueueBinding() {
   }
 
   const window = await chrome.windows.getCurrent();
-  const apiBaseUrl = $("remoteApiBaseUrl").value.trim();
+  const apiBaseUrl = normalizeLocalApiBaseUrl($("remoteApiBaseUrl").value);
   const queueId = $("queueId").value;
   const response = await chrome.runtime.sendMessage({
     type: "UPDATE_REMOTE_MONITOR_CONFIG",

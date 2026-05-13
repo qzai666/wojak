@@ -16,7 +16,8 @@ const DEFAULT_QUEUE_ID = queues[0].id;
 function sendHtml(response, html) {
   response.writeHead(200, {
     "Content-Type": "text/html; charset=utf-8",
-    "Cache-Control": "no-store"
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*"
   });
   response.end(html);
 }
@@ -24,9 +25,22 @@ function sendHtml(response, html) {
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store"
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type, Accept",
+    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS"
   });
   response.end(JSON.stringify(payload));
+}
+
+function sendOptions(response) {
+  response.writeHead(204, {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type, Accept",
+    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+    "Access-Control-Max-Age": "86400"
+  });
+  response.end();
 }
 
 function sendFile(response, filePath) {
@@ -787,6 +801,11 @@ function renderHomePage() {
 const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url, `http://${request.headers.host}`);
+
+    if (request.method === "OPTIONS") {
+      sendOptions(response);
+      return;
+    }
 
     if (request.method === "GET" && url.pathname === "/") {
       sendHtml(response, renderHomePage());
