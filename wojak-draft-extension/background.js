@@ -553,6 +553,33 @@ async function runIdleBrowse(windowId, queueId) {
   };
 }
 
+async function skipRemoteTaskAndContinue(task, errorMessage, options, nextCheckAt) {
+  try {
+    await reportRemoteResult({
+      remoteTaskId: String(task.remoteTaskId || task.id || ""),
+      queueId: String(task.queueId || DEFAULT_QUEUE_ID),
+      source: "remote",
+      state: "error",
+      error: errorMessage,
+      targetUrl: task.targetUrl || task.url || "",
+      statusId: task.statusId || ""
+    });
+  } catch (reportError) {
+    await chrome.storage.local.set({
+      remoteTaskMonitorLastError: reportError.message,
+      remoteTaskMonitorLastErrorAt: Date.now()
+    });
+    throw reportError;
+  }
+
+  await setMonitorStatus({
+    state: "skipped_invalid_task",
+    message: `已跳过当前任务：${errorMessage}`,
+    nextCheckAt
+  });
+  return checkRemoteTasks(options);
+}
+
 async function reportRemoteProgress(task) {
   const config = await getRemoteConfig();
   if (!config.apiBaseUrl || !task.remoteTaskId || TERMINAL_STATES.has(task.state)) {
@@ -731,18 +758,23 @@ async function checkRemoteTasks(options = {}) {
   const task = normalizeRemoteTask(remoteTask);
   if (task.type === "original") {
     if (!task.remoteTaskId || !task.originalText) {
-      throw new Error("Original task must include id and originalText");
+      return skipRemoteTaskAndContinue(task, "原创贴任务缺少必要内容", options, nextCheckAt);
     }
 
     const tab = await getOrCreateXTab(options.windowId);
+    let startedTask;
+    try {
+      startedTask = await startOriginalPost({
+        tabId: tab.id,
+        ...task,
+        source: "remote"
+      });
+    } catch (error) {
+      return skipRemoteTaskAndContinue(task, error.message || "原创贴任务启动失败", options, nextCheckAt);
+    }
     if (!isTestMode) {
       await markTargetActionStarted(targetActionKey);
     }
-    const startedTask = await startOriginalPost({
-      tabId: tab.id,
-      ...task,
-      source: "remote"
-    });
     const result = { started: true, task: startedTask, nextCheckAt };
     await setMonitorStatus({
       state: "started",
@@ -753,18 +785,23 @@ async function checkRemoteTasks(options = {}) {
   }
 
   if (!task.remoteTaskId || !task.targetUrl) {
-    throw new Error("Remote task must include id and targetUrl");
+    return skipRemoteTaskAndContinue(task, "目标任务缺少链接", options, nextCheckAt);
   }
 
   const tab = await getOrCreateXTab(options.windowId);
+  let startedTask;
+  try {
+    startedTask = await startAutoLike({
+      tabId: tab.id,
+      ...task,
+      source: "remote"
+    });
+  } catch (error) {
+    return skipRemoteTaskAndContinue(task, error.message || "目标任务启动失败", options, nextCheckAt);
+  }
   if (!isTestMode) {
     await markTargetActionStarted(targetActionKey);
   }
-  const startedTask = await startAutoLike({
-    tabId: tab.id,
-    ...task,
-    source: "remote"
-  });
   const result = { started: true, task: startedTask, nextCheckAt };
   await setMonitorStatus({
     state: "started",
