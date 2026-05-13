@@ -8,6 +8,7 @@ const REPLY_MODAL_CHECK_MS = 2000;
 const REPLY_DIALOG_WAIT_MS = 10000;
 const REPLY_RECOVER_WAIT_MS = 10000;
 const REPLY_RETRY_LIMIT = 3;
+const PAGE_RELOAD_WAIT_MS = 15000;
 
 let autoLikeTimer = null;
 let autoLikeTask = null;
@@ -763,6 +764,12 @@ async function recoverReplyDialog(dialog) {
   await delay(1000);
 }
 
+async function reloadTargetPost(task) {
+  location.reload();
+  await waitForCondition(() => isPostOpen(task), PAGE_RELOAD_WAIT_MS, SHORT_WAIT_MS);
+  await delay(1000);
+}
+
 async function waitForReplySubmitButton(root) {
   return waitForCondition(() => {
     const submitButton = findReplySubmitButton(root);
@@ -926,7 +933,23 @@ async function publishReply(task) {
       throw new Error("Target article not found");
     }
 
-    const dialog = await openReplyDialog(article);
+    let dialog = null;
+    try {
+      dialog = await openReplyDialog(article);
+    } catch (error) {
+      if (attempt < REPLY_RETRY_LIMIT - 1 && /Reply composer did not open|Reply action button not found/.test(error.message || "")) {
+        await reloadTargetPost(task);
+        continue;
+      }
+      location.assign("https://x.com/home");
+      await stopTask({
+        state: "error",
+        error: "网络问题",
+        completedAt: Date.now()
+      });
+      return;
+    }
+
     const draftBlock = findReplyDraftBlock(dialog);
     if (!draftBlock) {
       throw new Error("Reply draft block not found");

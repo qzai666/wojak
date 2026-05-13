@@ -7,7 +7,9 @@ const MONITOR_STATUS_KEY = "remoteTaskMonitorStatus";
 const MONITOR_WINDOW_ID_KEY = "remoteTaskMonitorWindowId";
 const WINDOW_MONITOR_MAP_KEY = "remoteTaskMonitorWindowConfigMap";
 const DEFAULT_QUEUE_ID = "default";
-const ACTION_INTERVAL_MS = 2 * 60 * 1000;
+const TARGET_ACTION_INTERVAL_MIN_MS = 2 * 60 * 1000;
+const TARGET_ACTION_INTERVAL_MAX_MS = 10 * 60 * 1000;
+const IDLE_ACTION_INTERVAL_MS = 2 * 60 * 1000;
 const ACTION_INTERVAL_MINUTES = 2;
 const POLL_INTERVAL_MS = 30 * 1000;
 const POLL_INTERVAL_MINUTES = 0.5;
@@ -120,6 +122,10 @@ function actionStorageKey(baseKey, queueId) {
   return `${baseKey}:${queueId || DEFAULT_QUEUE_ID}`;
 }
 
+function actionIntervalStorageKey(key) {
+  return `${key}:intervalMs`;
+}
+
 async function getTasks() {
   const stored = await chrome.storage.local.get(TASKS_KEY);
   return stored[TASKS_KEY] || {};
@@ -193,7 +199,8 @@ async function setRemoteConfig(config) {
     }
   }
   if (Boolean(config.enabled)) {
-    await chrome.storage.local.remove(actionStorageKey(LAST_TARGET_ACTION_AT_KEY, nextConfig.queueId));
+    const targetActionKey = actionStorageKey(LAST_TARGET_ACTION_AT_KEY, nextConfig.queueId);
+    await chrome.storage.local.remove([targetActionKey, actionIntervalStorageKey(targetActionKey)]);
   }
   await scheduleRemotePoll(nextConfig);
   if (Boolean(config.enabled) && nextConfig.apiBaseUrl) {
@@ -257,14 +264,28 @@ async function markActionStarted(key) {
   await chrome.storage.local.set({ [key]: Date.now() });
 }
 
-async function getActionWaitMs(key) {
-  const lastActionAt = await getLastActionAt(key);
-  return Math.max(0, ACTION_INTERVAL_MS - (Date.now() - lastActionAt));
+async function markTargetActionStarted(key) {
+  await chrome.storage.local.set({
+    [key]: Date.now(),
+    [actionIntervalStorageKey(key)]: randomInt(TARGET_ACTION_INTERVAL_MIN_MS / 60000, TARGET_ACTION_INTERVAL_MAX_MS / 60000) * 60000
+  });
 }
 
-async function canStartAction(key) {
+async function getActionIntervalMs(key, defaultIntervalMs) {
+  const stored = await chrome.storage.local.get(actionIntervalStorageKey(key));
+  return Number(stored[actionIntervalStorageKey(key)]) || defaultIntervalMs;
+}
+
+async function getActionWaitMs(key, defaultIntervalMs) {
   const lastActionAt = await getLastActionAt(key);
-  return Date.now() - lastActionAt >= ACTION_INTERVAL_MS;
+  const intervalMs = await getActionIntervalMs(key, defaultIntervalMs);
+  return Math.max(0, intervalMs - (Date.now() - lastActionAt));
+}
+
+async function canStartAction(key, defaultIntervalMs) {
+  const lastActionAt = await getLastActionAt(key);
+  const intervalMs = await getActionIntervalMs(key, defaultIntervalMs);
+  return Date.now() - lastActionAt >= intervalMs;
 }
 
 async function hasRunningTask(queueId = null) {
@@ -486,7 +507,11 @@ async function hasPendingRemoteTask(config) {
   }
 
   const payload = await response.json();
-  return (payload.tasks || []).some((task) => task.state === "pending");
+  const queueId = config.queueId || DEFAULT_QUEUE_ID;
+  return {
+    hasPendingTask: (payload.tasks || []).some((task) => task.state === "pending"),
+    queue: (payload.queues || []).find((queue) => queue.id === queueId) || null
+  };
 }
 
 async function reportRemoteResult(task) {
@@ -538,10 +563,12 @@ async function checkRemoteTasks(options = {}) {
     return result;
   }
 
-  const hasPendingTask = await hasPendingRemoteTask(config);
+  const pendingState = await hasPendingRemoteTask(config);
+  const hasPendingTask = pendingState.hasPendingTask;
+  const isTestMode = Boolean(pendingState.queue?.testMode);
   if (!hasPendingTask) {
     const idleActionKey = actionStorageKey(LAST_IDLE_ACTION_AT_KEY, config.queueId);
-    if (!await canStartAction(idleActionKey)) {
+    if (!await canStartAction(idleActionKey, IDLE_ACTION_INTERVAL_MS)) {
       const idleResult = await browseHome({ shouldLike: false, windowId: options.windowId, queueId: config.queueId });
       const result = { started: false, reason: "idle_scrolled", idleResult, nextCheckAt };
       await setMonitorStatus({
@@ -563,12 +590,12 @@ async function checkRemoteTasks(options = {}) {
   }
 
   const targetActionKey = actionStorageKey(LAST_TARGET_ACTION_AT_KEY, config.queueId);
-  if (!await canStartAction(targetActionKey)) {
-    const waitMs = await getActionWaitMs(targetActionKey);
+  if (!isTestMode && !await canStartAction(targetActionKey, TARGET_ACTION_INTERVAL_MIN_MS)) {
+    const waitMs = await getActionWaitMs(targetActionKey, TARGET_ACTION_INTERVAL_MIN_MS);
     const result = { started: false, reason: "waiting_target_interval", waitMs, nextCheckAt };
     await setMonitorStatus({
       state: "waiting_target_interval",
-      message: "监听中，等待目标任务 2 分钟间隔结束",
+      message: "监听中，等待目标任务随机间隔结束",
       waitMs,
       nextCheckAt
     });
@@ -594,7 +621,9 @@ async function checkRemoteTasks(options = {}) {
     }
 
     const tab = await getOrCreateXTab(options.windowId);
-    await markActionStarted(targetActionKey);
+    if (!isTestMode) {
+      await markTargetActionStarted(targetActionKey);
+    }
     const startedTask = await startOriginalPost({
       tabId: tab.id,
       ...task,
@@ -614,7 +643,9 @@ async function checkRemoteTasks(options = {}) {
   }
 
   const tab = await getOrCreateXTab(options.windowId);
-  await markActionStarted(targetActionKey);
+  if (!isTestMode) {
+    await markTargetActionStarted(targetActionKey);
+  }
   const startedTask = await startAutoLike({
     tabId: tab.id,
     ...task,

@@ -7,7 +7,7 @@ const PORT = Number(process.env.PORT || 8787);
 
 const tasks = [];
 const results = [];
-const queues = [{ id: "default", name: "默认队列", enabled: true }];
+const queues = [{ id: "default", name: "默认队列", enabled: true, testMode: false }];
 const COMMENTS_PATH = path.resolve(__dirname, "../comments.json");
 const ORIGINAL_PATH = path.resolve(__dirname, "../Original.json");
 const IMAGE_DIR = path.resolve(__dirname, "../image");
@@ -104,7 +104,8 @@ function createQueue(payload) {
   return {
     id: crypto.randomUUID(),
     name: name || `队列 ${queues.length + 1}`,
-    enabled: true
+    enabled: true,
+    testMode: false
   };
 }
 
@@ -479,6 +480,7 @@ function renderHomePage() {
         <div class="queue-toolbar">
           <span id="queueState" class="queue-state">已启动</span>
           <button id="toggleQueueBtn" class="secondary" type="button">关闭</button>
+          <button id="toggleTestModeBtn" class="secondary" type="button">开启测试</button>
           <button id="addQueueBtn" class="secondary" type="button">新增队列</button>
           <button id="renameQueueBtn" class="secondary" type="button">重命名</button>
           <button id="deleteQueueBtn" class="secondary" type="button">删除队列</button>
@@ -510,6 +512,7 @@ function renderHomePage() {
       const queueTabs = document.getElementById("queueTabs");
       const queueState = document.getElementById("queueState");
       const toggleQueueBtn = document.getElementById("toggleQueueBtn");
+      const toggleTestModeBtn = document.getElementById("toggleTestModeBtn");
       const addQueueBtn = document.getElementById("addQueueBtn");
       const renameQueueBtn = document.getElementById("renameQueueBtn");
       const deleteQueueBtn = document.getElementById("deleteQueueBtn");
@@ -558,14 +561,15 @@ function renderHomePage() {
         queueTabs.innerHTML = queues.map((queue) => {
           const activeClass = queue.id === activeQueueId ? " active" : "";
           const offClass = queue.enabled === false ? " off" : "";
-          const stateText = queue.enabled === false ? "（关）" : "";
+          const stateText = (queue.enabled === false ? "（关）" : "") + (queue.testMode ? "（测）" : "");
           return '<button class="queue-tab' + activeClass + offClass + '" type="button" data-queue-id="' + escapeHtml(queue.id) + '">' + escapeHtml(queue.name) + stateText + '</button>';
         }).join("");
         const activeQueue = queues.find((queue) => queue.id === activeQueueId);
         const enabled = activeQueue?.enabled !== false;
-        queueState.textContent = enabled ? "已启动" : "已关闭";
+        queueState.textContent = (enabled ? "已启动" : "已关闭") + (activeQueue?.testMode ? "，测试中" : "");
         queueState.className = enabled ? "queue-state" : "queue-state off";
         toggleQueueBtn.textContent = enabled ? "关闭" : "启动";
+        toggleTestModeBtn.textContent = activeQueue?.testMode ? "关闭测试" : "开启测试";
         deleteQueueBtn.disabled = queues.length <= 1;
       }
 
@@ -671,6 +675,23 @@ function renderHomePage() {
           return;
         }
         setStatus(result.queue.enabled ? "队列已启动。" : "队列已关闭。");
+        await refreshTasks();
+      });
+
+      toggleTestModeBtn.addEventListener("click", async () => {
+        const current = queues.find((queue) => queue.id === activeQueueId);
+        if (!current) return;
+        const response = await fetch("/api/wojak/queues/" + encodeURIComponent(activeQueueId), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ testMode: !current.testMode })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          setStatus(result.error || "测试模式更新失败", true);
+          return;
+        }
+        setStatus(result.queue.testMode ? "测试模式已开启，当前队列任务会跳过三连间隔。" : "测试模式已关闭。");
         await refreshTasks();
       });
 
@@ -850,6 +871,9 @@ const server = http.createServer(async (request, response) => {
       }
       if (Object.prototype.hasOwnProperty.call(payload, "enabled")) {
         queue.enabled = Boolean(payload.enabled);
+      }
+      if (Object.prototype.hasOwnProperty.call(payload, "testMode")) {
+        queue.testMode = Boolean(payload.testMode);
       }
       sendJson(response, 200, { queue, queues });
       return;
