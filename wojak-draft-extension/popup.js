@@ -97,6 +97,7 @@ function describeAutoLikeTask(task) {
     waiting_image: "正在等待图片上传…",
     publishing: "正在发布评论…",
     replied: "评论已发布，结果已回传",
+    spam_reply: "评论已发布，但可能被折叠为垃圾贴",
     already_replied: "已评论过，结果已回传",
     error: task.error ? `执行失败：${task.error}` : "执行失败"
   };

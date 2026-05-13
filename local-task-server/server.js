@@ -365,6 +365,11 @@ function renderHomePage() {
         background: rgba(244, 63, 94, 0.14);
       }
 
+      .badge.spam_reply {
+        color: #fbbf24;
+        background: rgba(245, 158, 11, 0.14);
+      }
+
       .empty {
         padding: 18px 16px;
         color: #8b95a7;
@@ -504,14 +509,15 @@ function renderHomePage() {
         const rows = tasks.slice().reverse().map((task) => {
           const result = resultsByTaskId.get(task.id) || {};
           const commentedUrl = result.commentedUrl || result.replyUrl || "";
+          const isSpamReply = task.state === "spam_reply" || result.state === "spam_reply";
           const completedAt = result.completedAt || task.completedAt || "";
           const copyButton = commentedUrl
             ? '<button class="copy-btn" type="button" data-copy="' + escapeHtml(commentedUrl) + '">复制</button>'
-            : '<span class="empty-link">等待评论完成</span>';
+            : (isSpamReply ? '<span class="empty-link">可能的垃圾贴</span>' : '<span class="empty-link">等待评论完成</span>');
           const deleteButton = '<button class="copy-btn" type="button" data-delete-task-id="' + escapeHtml(task.id) + '">删除记录</button>';
           return '<tr>' +
             '<td><code>' + escapeHtml(task.targetUrl) + '</code></td>' +
-            '<td>' + (commentedUrl ? '<code>' + escapeHtml(commentedUrl) + '</code>' : '<span class="empty-link">暂无</span>') + '</td>' +
+            '<td>' + (commentedUrl ? '<code>' + escapeHtml(commentedUrl) + '</code>' : (isSpamReply ? '<span class="empty-link">可能的垃圾贴</span>' : '<span class="empty-link">暂无</span>')) + '</td>' +
             '<td><span class="' + badgeClass(task.state) + '">' + escapeHtml(task.state) + '</span>' + (task.error ? '<div class="status error">' + escapeHtml(task.error) + '</div>' : '') + '</td>' +
             '<td>' + escapeHtml(formatTime(completedAt)) + '</td>' +
             '<td>' + copyButton + ' ' + deleteButton + '</td>' +

@@ -675,16 +675,16 @@ async function clickTweetButtonAndWait(root, commentText, beforeStatusIds, targe
     const result = await waitForCondition(() => {
       const replyUrl = findReplyUrl(commentText, beforeStatusIds, targetStatusId);
       if (replyUrl) {
-        return { ok: true, replyUrl };
+        return { ok: true, state: "replied", replyUrl };
       }
       if (!isVisible(root)) {
-        return { ok: true, replyUrl: "" };
+        return { ok: true, state: "spam_reply", replyUrl: "" };
       }
       return null;
     }, 8000, 500);
 
     if (result?.ok) {
-      return result.replyUrl || "";
+      return result;
     }
 
     await delay(1500);
@@ -856,10 +856,11 @@ async function publishReply(task) {
   if (!composerTextIncludes(finalTextbox, commentText)) {
     throw new Error("Reply text is not present before publishing");
   }
-  const replyUrl = await clickTweetButtonAndWait(finalRoot, commentText, beforeStatusIds, task.statusId);
-  if (!replyUrl && hasExistingReply(commentText)) {
+  const publishResult = await clickTweetButtonAndWait(finalRoot, commentText, beforeStatusIds, task.statusId);
+  const replyUrl = publishResult.replyUrl || "";
+  if (publishResult.state === "spam_reply") {
     await stopTask({
-      state: "replied",
+      state: "spam_reply",
       completedAt: Date.now(),
       replyUrl: "",
       commentedUrl: ""

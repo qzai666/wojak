@@ -12,7 +12,7 @@ const ACTION_INTERVAL_MINUTES = 2;
 const POLL_INTERVAL_MS = 30 * 1000;
 const POLL_INTERVAL_MINUTES = 0.5;
 const HOME_URL = "https://x.com/home";
-const TERMINAL_STATES = new Set(["replied", "already_replied", "error"]);
+const TERMINAL_STATES = new Set(["replied", "spam_reply", "already_replied", "error"]);
 
 const defaultComments = [
   "三箭齐发，直指Billion、ETH这边，$Wojak扛的是OG Meme回归的大旗",
