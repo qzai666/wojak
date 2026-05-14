@@ -12,6 +12,7 @@ const COMMENTS_PATH = path.resolve(__dirname, "../comments.json");
 const ORIGINAL_PATH = path.resolve(__dirname, "../Original.json");
 const IMAGE_DIR = path.resolve(__dirname, "../image");
 const DEFAULT_QUEUE_ID = queues[0].id;
+// 服务端 running 任务回收超时，超过后会释放给下一轮重新调度。
 const RUNNING_TASK_TIMEOUT_MS = 10 * 60 * 1000;
 const TERMINAL_TASK_STATES = new Set(["replied", "spam_reply", "already_replied", "error", "done"]);
 

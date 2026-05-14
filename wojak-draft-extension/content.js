@@ -1,11 +1,18 @@
 const AUTO_LIKE_INTERVAL_MS = 3000;
+// 目标帖子加载超时，超时后会走刷新重试逻辑。
 const TARGET_LOAD_TIMEOUT_MS = 10000;
+// 帖子已打开后，额外等待点赞/转发按钮渲染完成，避免 X 前端慢渲染导致误刷新。
+const TARGET_ACTION_READY_TIMEOUT_MS = 8000;
 const MAX_TARGET_REFRESH_COUNT = 3;
 const SHORT_WAIT_MS = 500;
+// 图片上传后的等待时间，给 X 前端处理上传结果。
 const UPLOAD_WAIT_MS = 15000;
+// 评论发布后等待新评论链接出现的时间。
 const REPLY_PUBLISH_WAIT_MS = 5000;
 const REPLY_MODAL_CHECK_MS = 2000;
+// 打开评论弹窗后的等待时间。
 const REPLY_DIALOG_WAIT_MS = 10000;
+// 评论弹窗异常时，等待页面恢复可操作状态的时间。
 const REPLY_RECOVER_WAIT_MS = 10000;
 const REPLY_RETRY_LIMIT = 3;
 const PAGE_RELOAD_WAIT_MS = 15000;
@@ -208,7 +215,25 @@ function isPostOpen(task) {
   }
 
   const article = getTargetArticle(task);
-  return Boolean(article && findLikeButton(article));
+  return Boolean(article);
+}
+
+function hasPostActionButtons(article) {
+  return Boolean(article && findLikeButton(article) && findRepostButton(article));
+}
+
+// 目标帖子 DOM 已经出现后，再给操作按钮一点渲染时间，避免刚进页面就被误判成失败。
+async function waitForTargetActionButtons(task) {
+  return waitForCondition(() => {
+    if (!isTargetUrl(task) || !isPageReady()) {
+      return null;
+    }
+    const article = getTargetArticle(task);
+    if (!article || !hasPostActionButtons(article)) {
+      return null;
+    }
+    return article;
+  }, TARGET_ACTION_READY_TIMEOUT_MS, 500);
 }
 
 async function reportState(patch) {
@@ -618,6 +643,15 @@ async function waitForHomeComposer() {
   return textbox;
 }
 
+// 原创贴发布前先让首页发帖框经历一次 focus/blur，减少 X 前端重绘导致的输入丢失。
+async function prepareOriginalComposer() {
+  const textbox = await waitForHomeComposer();
+  textbox.click();
+  textbox.blur();
+  await delay(1000);
+  return waitForHomeComposer();
+}
+
 function findOriginalPostUrl(text, beforeStatusIds) {
   const targetText = normalizeText(text);
   const articles = Array.from(document.querySelectorAll("article"));
@@ -644,9 +678,10 @@ async function publishOriginalPost(task) {
   }
 
   await reportState({ state: "composing" });
-  const textbox = await waitForHomeComposer();
-  await delay(1500);
+  let textbox = await prepareOriginalComposer();
   await ensureReplyText(textbox, originalText);
+  await delay(1000);
+  textbox = await waitForHomeComposer();
   const root = findComposerElement(textbox);
 
   if (task.imageAssetPath) {
@@ -1081,10 +1116,18 @@ async function tickAutoLike() {
       return;
     }
 
-    const article = getTargetArticle(autoLikeTask);
-    if (!article || !findLikeButton(article) || !findRepostButton(article)) {
+    let article = getTargetArticle(autoLikeTask);
+    if (!article) {
       await refreshIfNeeded(autoLikeTask);
       return;
+    }
+
+    if (!hasPostActionButtons(article)) {
+      article = await waitForTargetActionButtons(autoLikeTask);
+      if (!article) {
+        await refreshIfNeeded(autoLikeTask);
+        return;
+      }
     }
 
     const liked = await ensureLiked(article);

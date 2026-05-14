@@ -7,6 +7,8 @@ let remoteConfig = {
 let queues = [{ id: "default", name: "默认队列" }];
 let currentQueueTaskCount = 0;
 let lastQueueTaskCountFetchAt = 0;
+let popupRefreshTimer = null;
+let popupRefreshInFlight = false;
 
 const DEFAULT_QUEUE_ID = "default";
 const LAST_TARGET_ACTION_AT_KEY = "remoteTaskMonitorLastTargetActionAt";
@@ -139,19 +141,11 @@ async function getCurrentQueueWaitSeconds() {
   return Math.max(0, Math.ceil((intervalMs - (Date.now() - lastActionAt)) / 1000));
 }
 
-function getStatusWaitSeconds(status = null) {
-  if (status?.state !== "waiting_target_interval" || !status.waitMs) {
-    return 0;
-  }
-  return Math.max(0, Math.ceil((status.waitMs - Math.max(0, Date.now() - (status.updatedAt || Date.now()))) / 1000));
-}
-
-async function refreshQueueHint(status = null, force = false) {
+// 队列倒计时统一只读本地随机间隔，避免和后台状态里的 waitMs 两套口径互相打架。
+async function refreshQueueHint(status = null, force = false, waitSeconds = null) {
   const taskCount = await fetchCurrentQueueTaskCount(force);
   const activeLocalTaskCount = await fetchCurrentQueueActiveLocalTaskCount();
-  const statusWaitSeconds = getStatusWaitSeconds(status);
-  const storedWaitSeconds = await getCurrentQueueWaitSeconds();
-  const waitSeconds = statusWaitSeconds > 0 ? statusWaitSeconds : storedWaitSeconds;
+  const currentWaitSeconds = waitSeconds ?? await getCurrentQueueWaitSeconds();
 
   if (!taskCount) {
     setQueueHint("检测当前队列有0个任务，暂无待执行任务");
@@ -163,8 +157,8 @@ async function refreshQueueHint(status = null, force = false) {
     return;
   }
 
-  if (waitSeconds > 0) {
-    setQueueHint(`检测当前队列有${taskCount}个任务，还有${waitSeconds}s开始执行任务队列`);
+  if (currentWaitSeconds > 0) {
+    setQueueHint(`检测当前队列有${taskCount}个任务，还有${currentWaitSeconds}s开始执行任务队列`);
     return;
   }
 
@@ -254,6 +248,21 @@ async function refreshAutoLikeStatus() {
   setAutoLikeStatus(text, stateName);
 }
 
+// 弹窗只保留一个 1 秒刷新节拍，并发中的请求不再重复发起。
+async function refreshPopupState(force = false) {
+  if (popupRefreshInFlight) {
+    return;
+  }
+
+  popupRefreshInFlight = true;
+  try {
+    await refreshAutoLikeStatus();
+    await refreshMonitorStatus(force);
+  } finally {
+    popupRefreshInFlight = false;
+  }
+}
+
 async function refreshRemoteConfig() {
   const window = await chrome.windows.getCurrent();
   const response = await chrome.runtime.sendMessage({
@@ -277,7 +286,7 @@ async function refreshRemoteConfig() {
     await checkRemoteTasks();
     return;
   }
-  await refreshQueueHint(null, true);
+  await refreshPopupState(true);
 }
 
 async function checkRemoteTasks() {
@@ -293,53 +302,56 @@ async function checkRemoteTasks() {
 
   if (response.result?.started) {
     setRemoteStatus("已接收到链接，正在开始操作。", "watching");
-    await refreshMonitorStatus();
+    await refreshPopupState(true);
     return;
   }
 
   if (response.result?.reason === "waiting_target_interval") {
     setRemoteStatus(`监听中，目标任务间隔剩余 ${formatSeconds(response.result.waitMs)}。`, "watching");
-    await refreshMonitorStatus();
+    await refreshPopupState(true);
     return;
   }
 
   if (response.result?.reason === "idle_scrolled") {
     setRemoteStatus("没有新链接，已执行首页滚动浏览。", "watching");
-    await refreshMonitorStatus();
+    await refreshPopupState(true);
     return;
   }
 
   if (response.result?.idle) {
     setRemoteStatus("没有新链接，已执行首页随机点赞。", "watching");
-    await refreshMonitorStatus();
+    await refreshPopupState(true);
     return;
   }
 
   renderListenState();
-  await refreshMonitorStatus();
+  await refreshPopupState(true);
 }
 
-async function refreshMonitorStatus() {
+async function refreshMonitorStatus(force = false) {
   if (!remoteConfig.enabled) {
     setMonitorStatus("监听未启动");
-    await refreshQueueHint();
+    await refreshQueueHint(null, force);
     return;
   }
 
   const response = await chrome.runtime.sendMessage({ type: "GET_REMOTE_MONITOR_STATUS" });
   if (!response?.ok) {
     setMonitorStatus(response?.error || "监听状态读取失败", "error");
-    await refreshQueueHint();
+    await refreshQueueHint(null, force);
     return;
   }
 
   const status = response.status || {};
+  const waitSeconds = await getCurrentQueueWaitSeconds();
   const checkText = status.nextCheckAt ? `下次监听检查：${formatSeconds(status.nextCheckAt - Date.now())}` : "下次监听检查：等待调度";
-  const waitText = status.state === "waiting_target_interval" && status.waitMs
-    ? `；三连间隔剩余：${formatSeconds(status.waitMs - Math.max(0, Date.now() - (status.updatedAt || Date.now())))}`
-    : "";
+  const waitText = status.state !== "waiting_target_interval"
+    ? ""
+    : waitSeconds > 0
+      ? `；三连间隔剩余：${formatSeconds(waitSeconds * 1000)}`
+      : "；三连间隔已结束，等待下次监听检查";
   setMonitorStatus(`${checkText}${waitText}`, status.state || "watching");
-  await refreshQueueHint(status);
+  await refreshQueueHint(status, force, waitSeconds);
 }
 
 async function toggleListening() {
@@ -374,8 +386,7 @@ async function toggleListening() {
     queueId: response.config?.queueId || queueId
   };
   renderListenState();
-  await refreshMonitorStatus();
-  await refreshQueueHint(null, true);
+  await refreshPopupState(true);
 }
 
 async function updateQueueBinding() {
@@ -409,8 +420,7 @@ async function updateQueueBinding() {
     queueId: response.config?.queueId || queueId
   };
   renderQueues();
-  await refreshMonitorStatus();
-  await refreshQueueHint(null, true);
+  await refreshPopupState(true);
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -418,9 +428,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("queueId").addEventListener("change", updateQueueBinding);
   $("remoteApiBaseUrl").addEventListener("change", refreshQueues);
   await refreshRemoteConfig();
-  await refreshAutoLikeStatus();
-  await refreshMonitorStatus();
-  await refreshQueueHint(null, true);
-  setInterval(refreshAutoLikeStatus, 1000);
-  setInterval(refreshMonitorStatus, 1000);
+  await refreshPopupState(true);
+  popupRefreshTimer = window.setInterval(() => {
+    refreshPopupState().catch(() => {});
+  }, 1000);
 });

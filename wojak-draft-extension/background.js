@@ -7,15 +7,20 @@ const MONITOR_STATUS_KEY = "remoteTaskMonitorStatus";
 const MONITOR_WINDOW_ID_KEY = "remoteTaskMonitorWindowId";
 const WINDOW_MONITOR_MAP_KEY = "remoteTaskMonitorWindowConfigMap";
 const DEFAULT_QUEUE_ID = "default";
+// 三连任务调度的随机间隔，倒计时文案和实际执行都读这里。
 const TARGET_ACTION_INTERVAL_MIN_MS = 2 * 60 * 1000;
-const TARGET_ACTION_INTERVAL_MAX_MS = 10 * 60 * 1000;
+const TARGET_ACTION_INTERVAL_MAX_MS = 20 * 60 * 1000;
+// 无任务时首页随机点赞的间隔。
 const IDLE_ACTION_INTERVAL_MS = 2 * 60 * 1000;
 const ACTION_INTERVAL_MINUTES = 2;
+// 后台监听接口的轮询间隔。
 const POLL_INTERVAL_MS = 30 * 1000;
 const POLL_INTERVAL_MINUTES = 0.5;
 const HOME_URL = "https://x.com/home";
+// 扩展侧本地 running 任务的释放超时，防止窗口异常后一直卡住。
 const LOCAL_TASK_TIMEOUT_MS = 10 * 60 * 1000;
 const TERMINAL_STATES = new Set(["replied", "spam_reply", "already_replied", "error"]);
+const remoteTaskCheckPromises = new Map();
 
 const defaultComments = [
   "三箭齐发，直指Billion、ETH这边，$Wojak扛的是OG Meme回归的大旗",
@@ -577,7 +582,7 @@ async function skipRemoteTaskAndContinue(task, errorMessage, options, nextCheckA
     message: `已跳过当前任务：${errorMessage}`,
     nextCheckAt
   });
-  return checkRemoteTasks(options);
+  return checkRemoteTasksInternal(options);
 }
 
 async function reportRemoteProgress(task) {
@@ -689,7 +694,7 @@ async function retryPendingResultReports() {
   }
 }
 
-async function checkRemoteTasks(options = {}) {
+async function checkRemoteTasksInternal(options = {}) {
   if (Number.isInteger(options.windowId)) {
     try {
       await chrome.windows.get(options.windowId);
@@ -761,6 +766,7 @@ async function checkRemoteTasks(options = {}) {
       return skipRemoteTaskAndContinue(task, "原创贴任务缺少必要内容", options, nextCheckAt);
     }
 
+    await stopHomeBrowse(options.windowId);
     const tab = await getOrCreateXTab(options.windowId);
     let startedTask;
     try {
@@ -788,6 +794,7 @@ async function checkRemoteTasks(options = {}) {
     return skipRemoteTaskAndContinue(task, "目标任务缺少链接", options, nextCheckAt);
   }
 
+  await stopHomeBrowse(options.windowId);
   const tab = await getOrCreateXTab(options.windowId);
   let startedTask;
   try {
@@ -809,6 +816,25 @@ async function checkRemoteTasks(options = {}) {
     nextCheckAt
   });
   return result;
+}
+
+async function checkRemoteTasks(options = {}) {
+  const lockKey = Number.isInteger(options.windowId) ? String(options.windowId) : "global";
+  const currentPromise = remoteTaskCheckPromises.get(lockKey);
+  if (currentPromise) {
+    return currentPromise;
+  }
+
+  const nextPromise = (async () => {
+    try {
+      return await checkRemoteTasksInternal(options);
+    } finally {
+      remoteTaskCheckPromises.delete(lockKey);
+    }
+  })();
+
+  remoteTaskCheckPromises.set(lockKey, nextPromise);
+  return nextPromise;
 }
 
 async function startAutoLike({ tabId, targetUrl, commentText, imageAssetPath, imageFileName, remoteTaskId, queueId, source }) {
