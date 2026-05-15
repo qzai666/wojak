@@ -13,7 +13,7 @@ const WINDOW_MONITOR_MAP_KEY = "remoteTaskMonitorWindowConfigMap";
 const DEFAULT_QUEUE_ID = "default";
 // 三连任务调度的随机间隔，倒计时文案和实际执行都读这里。
 const TARGET_ACTION_INTERVAL_MIN_MS = 2 * 60 * 1000;
-const TARGET_ACTION_INTERVAL_MAX_MS = 20 * 60 * 1000;
+const TARGET_ACTION_INTERVAL_MAX_MS = 3 * 60 * 1000;
 // 无任务时首页随机点赞的间隔。
 const IDLE_ACTION_INTERVAL_MS = 2 * 60 * 1000;
 const ACTION_INTERVAL_MINUTES = 2;
