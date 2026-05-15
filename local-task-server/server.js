@@ -155,24 +155,30 @@ function fitTweetText(text, maxLength = 280) {
   return [...normalized].slice(0, maxLength - 1).join("").replace(/[，。；、\s]+$/u, "").trim();
 }
 
+function getGossipImageFileName(item) {
+  return String(item?.imageFileName || path.basename(item?.imageAssetPath || "")).trim();
+}
+
+function hasGossipImage(item) {
+  const imageFileName = getGossipImageFileName(item);
+  if (!imageFileName) {
+    return false;
+  }
+  const imagePath = path.resolve(GOSSIP_IMAGE_DIR, imageFileName);
+  return imagePath.startsWith(`${GOSSIP_IMAGE_DIR}${path.sep}`) && fs.existsSync(imagePath);
+}
+
 function loadGossipOriginal(request, index = null) {
-  const originals = JSON.parse(fs.readFileSync(GOSSIP_ORIGINAL_PATH, "utf8"));
+  const originals = JSON.parse(fs.readFileSync(GOSSIP_ORIGINAL_PATH, "utf8")).filter(hasGossipImage);
   const item = Number.isInteger(index) ? originals[index % originals.length] : pick(originals);
   const origin = `http://${request.headers.host}`;
-  const imageFileName = String(item?.imageFileName || path.basename(item?.imageAssetPath || "")).trim();
+  const imageFileName = getGossipImageFileName(item);
   const title = cleanCommentText(item?.title_cn || item?.title_en || "AI 图片灵感");
-  const category = cleanCommentText(item?.category_cn || item?.category || "");
-  const note = cleanCommentText(item?.note || "");
   const sourceText = cleanCommentText(item?.finalContent || item?.content || "");
-  const intro = [
-    title ? `今天刷到一个${title}方向的 AI 图，挺适合拿来做参考。` : "",
-    category ? `分类：${category}` : "",
-    note ? `备注：${note}` : "",
-    sourceText ? `提示词：${sourceText}` : ""
-  ].filter(Boolean).join("\n\n");
 
   return {
-    originalText: fitTweetText(intro || sourceText || title),
+    // 八卦原创贴的发帖文案直接读取 JSON 中已整理好的最终文案。
+    originalText: fitTweetText(sourceText || title),
     imageAssetPath: imageFileName ? `${origin}/gpt-image2/image/${encodeURIComponent(imageFileName)}` : "",
     imageFileName
   };

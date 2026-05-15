@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Wojak Draft Assistant",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Listen for Wojak tasks, auto like/repost/reply on X, and report completed links.",
   "permissions": [
     "alarms",
