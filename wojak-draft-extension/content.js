@@ -631,25 +631,33 @@ function findHomePostTextbox() {
   return boxes.find((box) => isVisible(box) && box.getAttribute("aria-label") !== "Search query") || null;
 }
 
-async function waitForHomeComposer() {
-  if (!location.pathname.startsWith("/home")) {
+function isOriginalComposerPage() {
+  return location.pathname.startsWith("/home") || location.pathname.startsWith("/compose/post");
+}
+
+function isStandaloneComposePage() {
+  return location.pathname.startsWith("/compose/post");
+}
+
+async function waitForOriginalComposer() {
+  if (!isOriginalComposerPage()) {
     location.assign("https://x.com/home");
-    await waitForCondition(() => location.pathname.startsWith("/home") && isPageReady(), 10000, 500);
+    await waitForCondition(() => isOriginalComposerPage() && isPageReady(), 10000, 500);
   }
   const textbox = await waitForCondition(findHomePostTextbox, 12000, 300);
   if (!textbox) {
-    throw new Error("Home post textbox not found");
+    throw new Error("Original post textbox not found");
   }
   return textbox;
 }
 
-// 原创贴发布前先让首页发帖框经历一次 focus/blur，减少 X 前端重绘导致的输入丢失。
+// 原创贴发布前先让发帖框经历一次 focus/blur，减少 X 前端重绘导致的输入丢失。
 async function prepareOriginalComposer() {
-  const textbox = await waitForHomeComposer();
+  const textbox = await waitForOriginalComposer();
   textbox.click();
   textbox.blur();
   await delay(1000);
-  return waitForHomeComposer();
+  return waitForOriginalComposer();
 }
 
 function findOriginalPostUrl(text, beforeStatusIds) {
@@ -681,7 +689,7 @@ async function publishOriginalPost(task) {
   let textbox = await prepareOriginalComposer();
   await ensureReplyText(textbox, originalText);
   await delay(1000);
-  textbox = await waitForHomeComposer();
+  textbox = await waitForOriginalComposer();
   const root = findComposerElement(textbox);
 
   if (task.imageAssetPath) {
@@ -835,7 +843,6 @@ async function clickTweetButtonAndWait(root, commentText, beforeStatusIds, targe
     return { ok: true, state: "replied", replyUrl };
   }
 
-  location.assign("https://x.com/home");
   return { ok: true, state: "spam_reply", replyUrl: "", error: "链接已被风控" };
 }
 
@@ -864,7 +871,6 @@ async function ensureLiked(article) {
       error: "点赞未完成，已跳过当前任务",
       completedAt: Date.now()
     });
-    location.assign("https://x.com/home");
     return false;
   }
 
@@ -875,6 +881,10 @@ async function ensureLiked(article) {
 async function browseHome(options = {}) {
   homeBrowseCancelled = false;
   const shouldLike = options.shouldLike !== false;
+  if (isStandaloneComposePage()) {
+    return { browsed: false, liked: false, reason: "compose_page" };
+  }
+
   if (!location.pathname.startsWith("/home")) {
     location.assign("https://x.com/home");
     await waitForCondition(() => location.pathname.startsWith("/home") && isPageReady(), 8000, 500);
@@ -983,7 +993,6 @@ async function publishReply(task) {
         await reloadTargetPost(task);
         continue;
       }
-      location.assign("https://x.com/home");
       await stopTask({
         state: "error",
         error: "网络问题",
@@ -1040,12 +1049,19 @@ async function publishReply(task) {
     }
 
     if (attempt < REPLY_RETRY_LIMIT - 1) {
+      if (isStandaloneComposePage()) {
+        await stopTask({
+          state: "error",
+          error: "当前处于原创发帖页，已停止评论重试",
+          completedAt: Date.now()
+        });
+        return;
+      }
       await recoverReplyDialog(dialog);
       continue;
     }
 
     await closeReplyDialog(dialog);
-    location.assign("https://x.com/home");
     await stopTask({
       state: "error",
       error: "网络问题",
@@ -1106,8 +1122,17 @@ async function tickAutoLike() {
   isTicking = true;
 
   try {
-    if (autoLikeTask.type === "original") {
+    if (autoLikeTask.type === "original" || autoLikeTask.type === "gossip_original") {
       await publishOriginalPost(autoLikeTask);
+      return;
+    }
+
+    if (isStandaloneComposePage()) {
+      await stopTask({
+        state: "error",
+        error: "当前处于原创发帖页，评论任务已跳过",
+        completedAt: Date.now()
+      });
       return;
     }
 
@@ -1162,6 +1187,14 @@ async function startAutoLike(task) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "STOP_HOME_BROWSE") {
     homeBrowseCancelled = true;
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message?.type === "START_AUTO_LIKE_TASK") {
+    startAutoLike(message.task).catch((error) => {
+      stopTask({ state: "error", error: error.message, completedAt: Date.now() });
+    });
     sendResponse({ ok: true });
     return true;
   }

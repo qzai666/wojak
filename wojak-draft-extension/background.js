@@ -21,6 +21,7 @@ const ACTION_INTERVAL_MINUTES = 2;
 const POLL_INTERVAL_MS = 30 * 1000;
 const POLL_INTERVAL_MINUTES = 0.5;
 const HOME_URL = "https://x.com/home";
+const COMPOSE_POST_PATH = "/compose/post";
 // 扩展侧本地 running 任务的释放超时，防止窗口异常后一直卡住。
 const LOCAL_TASK_TIMEOUT_MS = 10 * 60 * 1000;
 const TERMINAL_STATES = new Set(["replied", "spam_reply", "already_replied", "error"]);
@@ -101,6 +102,24 @@ function normalizeXUrl(url) {
     return parsed.toString();
   } catch {
     return url;
+  }
+}
+
+function isReusableOriginalPostUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === "x.com" && (parsed.pathname.startsWith("/home") || parsed.pathname.startsWith(COMPOSE_POST_PATH));
+  } catch {
+    return false;
+  }
+}
+
+function isComposePostUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === "x.com" && parsed.pathname.startsWith(COMPOSE_POST_PATH);
+  } catch {
+    return false;
   }
 }
 
@@ -356,8 +375,9 @@ async function getOrCreateXTab(windowId = null) {
   if (homeTab?.id) {
     return homeTab;
   }
-  if (tabs[0]?.id) {
-    return tabs[0];
+  const reusableTab = tabs.find((tab) => !isComposePostUrl(tab.url));
+  if (reusableTab?.id) {
+    return reusableTab;
   }
   return chrome.tabs.create({
     url: HOME_URL,
@@ -477,9 +497,9 @@ function remoteUrl(config, path) {
 
 function normalizeRemoteTask(remoteTask) {
   const imageAssetPath = remoteTask.imageAssetPath || pick(imageAssetPaths);
-  if (remoteTask.type === "original") {
+  if (remoteTask.type === "original" || remoteTask.type === "gossip_original") {
     return {
-      type: "original",
+      type: remoteTask.type === "gossip_original" ? "gossip_original" : "original",
       remoteTaskId: String(remoteTask.id || ""),
       queueId: String(remoteTask.queueId || DEFAULT_QUEUE_ID),
       targetUrl: HOME_URL,
@@ -529,8 +549,9 @@ async function hasPendingRemoteTask(config) {
 
   const payload = await response.json();
   const queueId = config.queueId || DEFAULT_QUEUE_ID;
+  const pendingTasks = payload.tasks || [];
   return {
-    hasPendingTask: (payload.tasks || []).some((task) => task.state === "pending"),
+    hasPendingTask: pendingTasks.some((task) => task.state === "pending"),
     queue: (payload.queues || []).find((queue) => queue.id === queueId) || null
   };
 }
@@ -758,7 +779,7 @@ async function checkRemoteTasksInternal(options = {}) {
   }
 
   const task = normalizeRemoteTask(remoteTask);
-  if (task.type === "original") {
+  if (task.type === "original" || task.type === "gossip_original") {
     if (!task.remoteTaskId || !task.originalText) {
       return skipRemoteTaskAndContinue(task, "原创贴任务缺少必要内容", options, nextCheckAt);
     }
@@ -871,14 +892,14 @@ async function startAutoLike({ tabId, targetUrl, commentText, imageAssetPath, im
   return tasks[String(tabId)];
 }
 
-async function startOriginalPost({ tabId, originalText, imageAssetPath, imageFileName, remoteTaskId, queueId, source }) {
+async function startOriginalPost({ tabId, type, originalText, imageAssetPath, imageFileName, remoteTaskId, queueId, source }) {
   if (!tabId || !originalText) {
     throw new Error("Missing tabId or originalText");
   }
 
   const tasks = await getTasks();
   tasks[String(tabId)] = {
-    type: "original",
+    type: type === "gossip_original" ? "gossip_original" : "original",
     targetUrl: HOME_URL,
     originalText: cleanCommentText(originalText),
     imageAssetPath: imageAssetPath || "",
@@ -892,9 +913,15 @@ async function startOriginalPost({ tabId, originalText, imageAssetPath, imageFil
   await setTasks(tasks);
 
   const tab = await chrome.tabs.get(tabId);
-  if (tab.url === HOME_URL) {
-    await chrome.tabs.reload(tabId);
+  if (isReusableOriginalPostUrl(tab.url)) {
     await chrome.tabs.update(tabId, { active: true });
+    const response = await sendTabMessageWithRetry(tabId, {
+      type: "START_AUTO_LIKE_TASK",
+      task: tasks[String(tabId)]
+    });
+    if (!response.ok) {
+      await chrome.tabs.update(tabId, { url: HOME_URL, active: true });
+    }
   } else {
     await chrome.tabs.update(tabId, { url: HOME_URL, active: true });
   }
@@ -933,6 +960,9 @@ async function triggerNextRemoteTaskCheck(tabId, task) {
   try {
     const tab = await chrome.tabs.get(Number(tabId));
     if (!Number.isInteger(tab?.windowId)) {
+      return;
+    }
+    if (isComposePostUrl(tab.url)) {
       return;
     }
     await checkRemoteTasks({ windowId: tab.windowId });
@@ -974,7 +1004,8 @@ async function updateTaskState(tabId, patch) {
       await reportRemoteResult(nextTask);
       delete tasks[key];
       await setTasks(tasks);
-      if (nextTask.state !== "error") {
+      const tab = await chrome.tabs.get(Number(tabId));
+      if (nextTask.state !== "error" && !isComposePostUrl(tab.url)) {
         await chrome.tabs.update(Number(tabId), { url: HOME_URL, active: true });
       }
       await triggerNextRemoteTaskCheck(tabId, nextTask);

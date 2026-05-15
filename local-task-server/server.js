@@ -8,9 +8,12 @@ const PORT = Number(process.env.PORT || 8787);
 const tasks = [];
 const results = [];
 const queues = [{ id: "default", name: "默认队列", enabled: true, testMode: false }];
+let gossipOriginalRound = 0;
 const COMMENTS_PATH = path.resolve(__dirname, "../comments.json");
 const ORIGINAL_PATH = path.resolve(__dirname, "../Original.json");
+const GOSSIP_ORIGINAL_PATH = path.resolve(__dirname, "../gpt-image2/Original-prompts.json");
 const IMAGE_DIR = path.resolve(__dirname, "../image");
+const GOSSIP_IMAGE_DIR = path.resolve(__dirname, "../gpt-image2/image");
 const DEFAULT_QUEUE_ID = queues[0].id;
 // 服务端 running 任务回收超时，超过后会释放给下一轮重新调度。
 const RUNNING_TASK_TIMEOUT_MS = 10 * 60 * 1000;
@@ -142,6 +145,37 @@ function loadRandomOriginal() {
   const originals = JSON.parse(fs.readFileSync(ORIGINAL_PATH, "utf8"));
   const item = pick(originals);
   return cleanCommentText(item?.content);
+}
+
+function fitTweetText(text, maxLength = 280) {
+  const normalized = cleanCommentText(text);
+  if ([...normalized].length <= maxLength) {
+    return normalized;
+  }
+  return [...normalized].slice(0, maxLength - 1).join("").replace(/[，。；、\s]+$/u, "").trim();
+}
+
+function loadGossipOriginal(request, index = null) {
+  const originals = JSON.parse(fs.readFileSync(GOSSIP_ORIGINAL_PATH, "utf8"));
+  const item = Number.isInteger(index) ? originals[index % originals.length] : pick(originals);
+  const origin = `http://${request.headers.host}`;
+  const imageFileName = String(item?.imageFileName || path.basename(item?.imageAssetPath || "")).trim();
+  const title = cleanCommentText(item?.title_cn || item?.title_en || "AI 图片灵感");
+  const category = cleanCommentText(item?.category_cn || item?.category || "");
+  const note = cleanCommentText(item?.note || "");
+  const sourceText = cleanCommentText(item?.finalContent || item?.content || "");
+  const intro = [
+    title ? `今天刷到一个${title}方向的 AI 图，挺适合拿来做参考。` : "",
+    category ? `分类：${category}` : "",
+    note ? `备注：${note}` : "",
+    sourceText ? `提示词：${sourceText}` : ""
+  ].filter(Boolean).join("\n\n");
+
+  return {
+    originalText: fitTweetText(intro || sourceText || title),
+    imageAssetPath: imageFileName ? `${origin}/gpt-image2/image/${encodeURIComponent(imageFileName)}` : "",
+    imageFileName
+  };
 }
 
 function loadRandomImageUrl(request) {
@@ -491,7 +525,7 @@ function renderHomePage() {
           <h1>Wojak Task Console</h1>
           <p class="subtitle">输入链接后会加入所有队列，已启动的队列会按顺序执行。</p>
         </div>
-        <button id="refreshBtn" class="secondary" type="button">刷新任务</button>
+        <button id="refreshBtn" class="secondary" type="button">发布八卦原贴</button>
       </header>
 
       <section class="input-panel">
@@ -615,6 +649,7 @@ function renderHomePage() {
         queues = payload.queues || queues;
         activeQueueId = payload.queueId || activeQueueId;
         localStorage.setItem("wojakActiveQueueId", activeQueueId);
+        document.getElementById("refreshBtn").textContent = "发布八卦原贴（n=" + Number(payload.gossipOriginalRound || 0) + "）";
         renderQueues();
 
         const tasks = payload.tasks || [];
@@ -624,14 +659,17 @@ function renderHomePage() {
           const commentedUrl = result.originalUrl || result.commentedUrl || result.replyUrl || "";
           const isSpamReply = task.state === "spam_reply" || result.state === "spam_reply";
           const isOriginal = task.type === "original";
+          const isGossipOriginal = task.type === "gossip_original";
           const isCopied = Boolean(task.copiedAt);
           const completedAt = result.completedAt || task.completedAt || "";
-          const copyButton = commentedUrl
+          const copyButton = isGossipOriginal
+            ? '<span class="empty-link">无需复制</span>'
+            : commentedUrl
             ? '<button class="copy-btn' + (isCopied ? ' copied' : '') + '" type="button" data-copy="' + escapeHtml(commentedUrl) + '" data-copy-task-id="' + escapeHtml(task.id) + '"' + (isCopied ? ' disabled' : '') + '>' + (isCopied ? '已复制' : '复制') + '</button>'
             : (isSpamReply ? '<span class="empty-link">可能的垃圾贴</span>' : '<span class="empty-link">等待评论完成</span>');
           const deleteButton = '<button class="copy-btn" type="button" data-delete-task-id="' + escapeHtml(task.id) + '">删除记录</button>';
           return '<tr>' +
-            '<td>' + (isOriginal ? '<span class="task-tag">原创贴</span>' : '') + '<code>' + escapeHtml(task.targetUrl || task.originalText || "") + '</code></td>' +
+            '<td>' + (isOriginal ? '<span class="task-tag">原创贴</span>' : '') + (isGossipOriginal ? '<span class="task-tag">八卦原贴</span>' : '') + '<code>' + escapeHtml(task.targetUrl || task.originalText || "") + '</code></td>' +
             '<td>' + (commentedUrl ? '<code>' + escapeHtml(commentedUrl) + '</code>' : (isSpamReply ? '<span class="empty-link">可能的垃圾贴</span>' : '<span class="empty-link">暂无</span>')) + '</td>' +
             '<td><span class="' + badgeClass(task.state) + '">' + escapeHtml(task.state) + '</span>' + (task.error ? '<div class="status error">' + escapeHtml(task.error) + '</div>' : '') + '</td>' +
             '<td>' + escapeHtml(formatTime(task.createdAt)) + '</td>' +
@@ -848,7 +886,27 @@ function renderHomePage() {
         await refreshTasks();
       });
 
-      document.getElementById("refreshBtn").addEventListener("click", refreshTasks);
+      document.getElementById("refreshBtn").addEventListener("click", async () => {
+        const button = document.getElementById("refreshBtn");
+        button.disabled = true;
+        setStatus("正在给所有队列加入八卦原贴任务...");
+        try {
+          const response = await fetch("/api/wojak/gossip-original-tasks", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" }
+          });
+          const result = await response.json();
+          if (!response.ok) {
+            throw new Error(result.error || "八卦原贴任务创建失败");
+          }
+          setStatus("已给所有队列加入 " + (result.tasks?.length || 0) + " 条八卦原贴任务。");
+          await refreshTasks();
+        } catch (error) {
+          setStatus(error.message, true);
+        } finally {
+          button.disabled = false;
+        }
+      });
       clearTasksBtn.addEventListener("click", clearTasks);
       refreshTasks();
       window.setInterval(refreshTasks, 5000);
@@ -876,6 +934,17 @@ const server = http.createServer(async (request, response) => {
       const filePath = path.resolve(IMAGE_DIR, imageMatch[1]);
       if (!filePath.startsWith(IMAGE_DIR) || !fs.existsSync(filePath)) {
         sendJson(response, 404, { error: "Image not found" });
+        return;
+      }
+      sendFile(response, filePath);
+      return;
+    }
+
+    const gossipImageMatch = decodeURIComponent(url.pathname).match(/^\/gpt-image2\/image\/([^/]+)$/);
+    if (request.method === "GET" && gossipImageMatch) {
+      const filePath = path.resolve(GOSSIP_IMAGE_DIR, gossipImageMatch[1]);
+      if (!filePath.startsWith(GOSSIP_IMAGE_DIR) || !fs.existsSync(filePath)) {
+        sendJson(response, 404, { error: "Gossip image not found" });
         return;
       }
       sendFile(response, filePath);
@@ -990,10 +1059,32 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/wojak/gossip-original-tasks") {
+      await readJson(request);
+      const round = gossipOriginalRound;
+      const queueCount = queues.length;
+      const createdTasks = queues.map((queue, index) => {
+        const gossip = loadGossipOriginal(request, round * queueCount + index);
+        return createTask({
+          type: "gossip_original",
+          queueId: queue.id,
+          targetUrl: "https://x.com/home",
+          originalText: gossip.originalText,
+          imageAssetPath: gossip.imageAssetPath,
+          imageFileName: gossip.imageFileName
+        });
+      });
+      gossipOriginalRound += 1;
+      tasks.push(...createdTasks);
+      sendJson(response, 201, { tasks: createdTasks, round, nextRound: gossipOriginalRound });
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/api/wojak/tasks/next") {
       const queueId = normalizeQueueId(url.searchParams.get("queueId"));
       const queue = queues.find((item) => item.id === queueId);
-      if (queue?.enabled === false) {
+      const pendingTask = tasks.find((item) => item.queueId === queueId && item.state === "pending");
+      if (queue?.enabled === false && pendingTask?.type !== "gossip_original") {
         sendJson(response, 200, { task: null, queueDisabled: true });
         return;
       }
@@ -1005,18 +1096,24 @@ const server = http.createServer(async (request, response) => {
         return;
       }
 
-      const task = tasks.find((item) => item.queueId === queueId && item.state === "pending");
+      const task = pendingTask;
 
       if (!task) {
         sendJson(response, 200, { task: null });
         return;
       }
 
-      if (task.type !== "original" && !task.commentText) {
+      if (task.type !== "original" && task.type !== "gossip_original" && !task.commentText) {
         task.commentText = loadRandomComment();
       }
       if (task.type === "original" && !task.originalText) {
         task.originalText = loadRandomOriginal();
+      }
+      if (task.type === "gossip_original" && !task.originalText) {
+        const gossip = loadGossipOriginal(request);
+        task.originalText = gossip.originalText;
+        task.imageAssetPath = gossip.imageAssetPath;
+        task.imageFileName = gossip.imageFileName;
       }
       const startedAt = new Date().toISOString();
       task.state = "running";
@@ -1112,6 +1209,7 @@ const server = http.createServer(async (request, response) => {
       sendJson(response, 200, {
         queueId,
         queueName: queueLabel(queueId),
+        gossipOriginalRound,
         queues,
         tasks: queueTasks,
         results: queueResults
