@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Wojak Draft Assistant",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Listen for Wojak tasks, auto like/repost/reply on X, and report completed links.",
   "permissions": [
     "alarms",
@@ -18,6 +18,12 @@
   ],
   "background": {
     "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
   },
   "content_scripts": [
     {
@@ -42,6 +48,12 @@
   ],
   "action": {
     "default_title": "Wojak Draft Assistant",
-    "default_popup": "popup.html"
-  }
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3PcS9s9wLaEXTesJQFIO5nIayLuLyjr7jS+OlDZDga/S9ItA4t1fPbyyLcI4tGMtVJOwadDRdnuBmzi7xMKgV+myHTxkVBoGZ4OHcwlDDkFfTJGaMh8FX4Yw0qmavdZON3cQCU3bDQPN97NK3QuTpH+cGhMz7f9wYCvdXspseaGoVIJawqbFaH/pSPnAoXGeqiG+jxxyOMN0TmGG32NLmI93LBuNnnAj+rM5JO+W2J0kwGIHKr+wtSDH5yKgCJtBagFRlKctFBlgcqegadSKTkGs5S22SxyrxgrdjS83XmXV7jXkUwWoYwgHGLWEo6A0Ihf7hR6TB2SxgpS5peD4BQIDAQAB"
 }

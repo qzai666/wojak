@@ -1,3 +1,7 @@
+try {
+  importScripts("env.local.js");
+} catch {}
+
 const TASKS_KEY = "autoLikeTasks";
 const REMOTE_CONFIG_KEY = "remoteTaskMonitorConfig";
 const REMOTE_POLL_ALARM = "remoteTaskPoll";
@@ -115,18 +119,11 @@ function cleanCommentText(text) {
 }
 
 function normalizeLocalApiBaseUrl(value) {
-  const rawValue = String(value || "").trim().replace(/\/+$/, "");
-  try {
-    const url = new URL(rawValue);
-    if (url.protocol === "http:" && url.hostname === "localhost") {
-      url.hostname = "127.0.0.1";
-      return url.toString().replace(/\/+$/, "");
-    }
-  } catch {
-    return rawValue;
-  }
-  return rawValue;
+  return String(value || "").trim().replace(/\/+$/, "");
 }
+
+// 本地 env 提供后台监听默认地址，没手动改配置时直接走这里。
+const DEFAULT_API_BASE_URL = normalizeLocalApiBaseUrl(globalThis.WOJAK_EXTENSION_ENV?.apiBaseUrl || "http://localhost:8787/");
 
 function actionStorageKey(baseKey, queueId) {
   return `${baseKey}:${queueId || DEFAULT_QUEUE_ID}`;
@@ -149,7 +146,7 @@ async function getRemoteConfig() {
   const stored = await chrome.storage.local.get(REMOTE_CONFIG_KEY);
   return {
     enabled: false,
-    apiBaseUrl: "",
+    apiBaseUrl: DEFAULT_API_BASE_URL,
     queueId: DEFAULT_QUEUE_ID,
     pollMinutes: ACTION_INTERVAL_MINUTES,
     ...(stored[REMOTE_CONFIG_KEY] || {})
@@ -193,7 +190,7 @@ async function getRemoteConfigForWindow(windowId = null) {
 async function setRemoteConfig(config) {
   const nextConfig = {
     enabled: Number.isInteger(config.windowId) ? false : Boolean(config.enabled),
-    apiBaseUrl: normalizeLocalApiBaseUrl(config.apiBaseUrl),
+    apiBaseUrl: normalizeLocalApiBaseUrl(config.apiBaseUrl || DEFAULT_API_BASE_URL),
     queueId: String(config.queueId || DEFAULT_QUEUE_ID),
     pollMinutes: ACTION_INTERVAL_MINUTES
   };

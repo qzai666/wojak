@@ -1,6 +1,6 @@
 let remoteConfig = {
   enabled: false,
-  apiBaseUrl: "",
+  apiBaseUrl: globalThis.WOJAK_EXTENSION_ENV?.apiBaseUrl || "",
   queueId: "default"
 };
 
@@ -9,6 +9,7 @@ let currentQueueTaskCount = 0;
 let lastQueueTaskCountFetchAt = 0;
 let popupRefreshTimer = null;
 let popupRefreshInFlight = false;
+let currentApiBaseUrl = "";
 
 const DEFAULT_QUEUE_ID = "default";
 const LAST_TARGET_ACTION_AT_KEY = "remoteTaskMonitorLastTargetActionAt";
@@ -53,17 +54,16 @@ function escapeHtml(value) {
 }
 
 function normalizeLocalApiBaseUrl(value) {
-  const rawValue = String(value || "").trim().replace(/\/+$/, "");
-  try {
-    const url = new URL(rawValue);
-    if (url.protocol === "http:" && url.hostname === "localhost") {
-      url.hostname = "127.0.0.1";
-      return url.toString().replace(/\/+$/, "");
-    }
-  } catch {
-    return rawValue;
-  }
-  return rawValue;
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+// 本地 env 只负责提供扩展默认服务地址，面板里仍然允许手动改写。
+const DEFAULT_API_BASE_URL = normalizeLocalApiBaseUrl(globalThis.WOJAK_EXTENSION_ENV?.apiBaseUrl || "http://localhost:8787/");
+
+function applyExtensionVersion() {
+  const version = chrome.runtime?.getManifest?.().version || "";
+  $("versionText").textContent = version ? `v${version}` : "";
+  document.title = version ? `Wojak Draft ${$("versionText").textContent}` : "Wojak Draft Assistant";
 }
 
 function actionStorageKey(baseKey, queueId) {
@@ -76,6 +76,45 @@ function actionIntervalStorageKey(key) {
 
 function getCurrentQueueId() {
   return $("queueId")?.value || remoteConfig.queueId || DEFAULT_QUEUE_ID;
+}
+
+function getApiBaseUrlFromTabUrl(tabUrl) {
+  try {
+    const url = new URL(String(tabUrl || ""));
+    if (!/^https?:$/.test(url.protocol)) {
+      return "";
+    }
+    if (!["localhost", "127.0.0.1", "::1"].includes(url.hostname)) {
+      return "";
+    }
+    return normalizeLocalApiBaseUrl(url.origin);
+  } catch {
+    return "";
+  }
+}
+
+async function getCurrentTabApiBaseUrl() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return getApiBaseUrlFromTabUrl(tab?.url);
+  } catch {
+    return "";
+  }
+}
+
+// 未开启监听时优先拿当前活动页地址，已开启监听时展示当前实际生效地址。
+async function syncRemoteApiBaseUrlInput() {
+  const currentTabApiBaseUrl = await getCurrentTabApiBaseUrl();
+  const apiBaseUrl = remoteConfig.enabled
+    ? remoteConfig.apiBaseUrl || currentTabApiBaseUrl || DEFAULT_API_BASE_URL
+    : currentTabApiBaseUrl || remoteConfig.apiBaseUrl || DEFAULT_API_BASE_URL;
+  currentApiBaseUrl = apiBaseUrl;
+  $("remoteApiBaseUrl").textContent = apiBaseUrl;
+  return apiBaseUrl;
+}
+
+function getResolvedApiBaseUrl() {
+  return currentApiBaseUrl || remoteConfig.apiBaseUrl || DEFAULT_API_BASE_URL;
 }
 
 function renderQueues() {
@@ -93,7 +132,7 @@ async function fetchCurrentQueueTaskCount(force = false) {
     return currentQueueTaskCount;
   }
 
-  const apiBaseUrl = normalizeLocalApiBaseUrl($("remoteApiBaseUrl").value) || remoteConfig.apiBaseUrl || "http://127.0.0.1:8787";
+  const apiBaseUrl = getResolvedApiBaseUrl();
   if (!apiBaseUrl) {
     currentQueueTaskCount = 0;
     lastQueueTaskCountFetchAt = now;
@@ -171,7 +210,7 @@ async function refreshQueueHint(status = null, force = false, waitSeconds = null
 }
 
 async function refreshQueues() {
-  const apiBaseUrl = normalizeLocalApiBaseUrl($("remoteApiBaseUrl").value) || remoteConfig.apiBaseUrl || "http://127.0.0.1:8787";
+  const apiBaseUrl = getResolvedApiBaseUrl();
   try {
     const response = await fetch(`${apiBaseUrl}/api/wojak/queues`);
     if (!response.ok) {
@@ -256,6 +295,7 @@ async function refreshPopupState(force = false) {
 
   popupRefreshInFlight = true;
   try {
+    await syncRemoteApiBaseUrlInput();
     await refreshAutoLikeStatus();
     await refreshMonitorStatus(force);
   } finally {
@@ -276,10 +316,10 @@ async function refreshRemoteConfig() {
 
   remoteConfig = {
     enabled: Boolean(response.config?.enabled),
-    apiBaseUrl: response.config?.apiBaseUrl || "http://127.0.0.1:8787",
+    apiBaseUrl: response.config?.apiBaseUrl || DEFAULT_API_BASE_URL,
     queueId: response.config?.queueId || "default"
   };
-  $("remoteApiBaseUrl").value = remoteConfig.apiBaseUrl;
+  await syncRemoteApiBaseUrlInput();
   await refreshQueues();
   renderListenState();
   if (remoteConfig.enabled) {
@@ -356,7 +396,7 @@ async function refreshMonitorStatus(force = false) {
 
 async function toggleListening() {
   const nextEnabled = !remoteConfig.enabled;
-  const apiBaseUrl = normalizeLocalApiBaseUrl($("remoteApiBaseUrl").value);
+  const apiBaseUrl = await syncRemoteApiBaseUrlInput();
   const queueId = $("queueId").value;
   const window = await chrome.windows.getCurrent();
 
@@ -397,7 +437,7 @@ async function updateQueueBinding() {
   }
 
   const window = await chrome.windows.getCurrent();
-  const apiBaseUrl = normalizeLocalApiBaseUrl($("remoteApiBaseUrl").value);
+  const apiBaseUrl = await syncRemoteApiBaseUrlInput();
   const queueId = $("queueId").value;
   const response = await chrome.runtime.sendMessage({
     type: "UPDATE_REMOTE_MONITOR_CONFIG",
@@ -424,9 +464,9 @@ async function updateQueueBinding() {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
+  applyExtensionVersion();
   $("listenBtn").addEventListener("click", toggleListening);
   $("queueId").addEventListener("change", updateQueueBinding);
-  $("remoteApiBaseUrl").addEventListener("change", refreshQueues);
   await refreshRemoteConfig();
   await refreshPopupState(true);
   popupRefreshTimer = window.setInterval(() => {

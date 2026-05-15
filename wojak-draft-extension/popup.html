@@ -9,14 +9,14 @@
   <body>
     <main>
       <header>
-        <h1>Wojak Draft</h1>
+        <h1><span>Wojak Draft</span><span id="versionText" class="title-version"></span></h1>
         <span id="listenBadge" class="badge">静默</span>
       </header>
 
       <section class="panel">
         <label>
           前端服务地址
-          <input id="remoteApiBaseUrl" type="url" placeholder="http://127.0.0.1:8787">
+          <span id="remoteApiBaseUrl" class="readonly-field">http://localhost:8787</span>
         </label>
         <label>
           当前窗口队列
@@ -31,6 +31,7 @@
       <p id="monitorStatus" class="status" role="status">监听未启动</p>
       <p id="autoLikeStatus" class="status" role="status">暂无执行中的任务</p>
     </main>
+    <script src="env.local.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

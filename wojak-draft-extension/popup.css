@@ -25,8 +25,17 @@ header {
 
 h1 {
   margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   font-size: 18px;
   line-height: 1.2;
+}
+
+.title-version {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .panel {
@@ -41,6 +50,7 @@ label {
   font-weight: 600;
 }
 
+.readonly-field,
 input,
 select,
 button {
@@ -50,11 +60,20 @@ button {
   font: inherit;
 }
 
+.readonly-field,
 input,
 select {
   width: 100%;
   padding: 0 9px;
   background: #fff;
+}
+
+.readonly-field {
+  display: flex;
+  align-items: center;
+  color: #111418;
+  font-weight: 500;
+  word-break: break-all;
 }
 
 button {
