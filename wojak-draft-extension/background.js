@@ -13,9 +13,10 @@ const WINDOW_MONITOR_MAP_KEY = "remoteTaskMonitorWindowConfigMap";
 const DEFAULT_QUEUE_ID = "default";
 // 三连任务调度的随机间隔，倒计时文案和实际执行都读这里。
 const TARGET_ACTION_INTERVAL_MIN_MS = 2 * 60 * 1000;
-const TARGET_ACTION_INTERVAL_MAX_MS = 3 * 60 * 1000;
-// 无任务时首页随机点赞的间隔。
-const IDLE_ACTION_INTERVAL_MS = 2 * 60 * 1000;
+const TARGET_ACTION_INTERVAL_MAX_MS = 10 * 60 * 1000;
+// 无任务时首页随机点赞的间隔，每次点赞后重新抽一个下一次间隔。
+const IDLE_ACTION_INTERVAL_MIN_MS = 1 * 60 * 1000;
+const IDLE_ACTION_INTERVAL_MAX_MS = 5 * 60 * 1000;
 const ACTION_INTERVAL_MINUTES = 2;
 // 后台监听接口的轮询间隔。
 const POLL_INTERVAL_MS = 30 * 1000;
@@ -286,8 +287,11 @@ async function getLastActionAt(key) {
   return Number(stored[key]) || 0;
 }
 
-async function markActionStarted(key) {
-  await chrome.storage.local.set({ [key]: Date.now() });
+async function markIdleActionStarted(key) {
+  await chrome.storage.local.set({
+    [key]: Date.now(),
+    [actionIntervalStorageKey(key)]: randomInt(IDLE_ACTION_INTERVAL_MIN_MS, IDLE_ACTION_INTERVAL_MAX_MS)
+  });
 }
 
 async function markTargetActionStarted(key) {
@@ -464,7 +468,7 @@ async function browseHome({ shouldLike, windowId, queueId }) {
     });
   }
   if (shouldLike && response.ok) {
-    await markActionStarted(actionStorageKey(LAST_IDLE_ACTION_AT_KEY, queueId));
+    await markIdleActionStarted(actionStorageKey(LAST_IDLE_ACTION_AT_KEY, queueId));
   }
   await chrome.storage.local.set({
     remoteTaskMonitorLastIdleAt: Date.now(),
@@ -559,7 +563,7 @@ async function hasPendingRemoteTask(config) {
 // 没有可立即执行的目标任务时，继续保持首页滚动；点赞仍然走独立的空闲间隔。
 async function runIdleBrowse(windowId, queueId) {
   const idleActionKey = actionStorageKey(LAST_IDLE_ACTION_AT_KEY, queueId);
-  if (!await canStartAction(idleActionKey, IDLE_ACTION_INTERVAL_MS)) {
+  if (!await canStartAction(idleActionKey, IDLE_ACTION_INTERVAL_MIN_MS)) {
     const idleResult = await browseHome({ shouldLike: false, windowId, queueId });
     return {
       idleResult,

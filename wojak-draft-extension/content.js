@@ -171,28 +171,34 @@ function visibleArticles() {
 
 async function humanScrollHome() {
   homeBrowseCancelled = false;
-  const steps = randomInt(3, 6);
+  const steps = randomInt(3, 7);
+  let usedLongPause = false;
   for (let step = 0; step < steps; step += 1) {
     if (homeBrowseCancelled) {
       return;
     }
-    const direction = step > 1 && Math.random() < 0.22 ? -1 : 1;
-    const distance = randomInt(220, Math.max(360, Math.floor(window.innerHeight * 0.85))) * direction;
+    const direction = step > 1 && Math.random() < 0.2 ? -1 : 1;
+    const distance = randomInt(160, Math.max(320, Math.floor(window.innerHeight * 0.75))) * direction;
     window.scrollBy({
       top: distance,
       behavior: "smooth"
     });
-    await delay(randomInt(900, 2200));
+    // 首页空闲浏览模拟真实阅读：滚动后停一会，偶尔停久一点。
+    const shouldLongPause = !usedLongPause && step > 0 && Math.random() < 0.35;
+    if (shouldLongPause) {
+      usedLongPause = true;
+    }
+    await delay(shouldLongPause ? randomInt(5000, 11000) : randomInt(1200, 3600));
     if (homeBrowseCancelled) {
       return;
     }
 
-    if (Math.random() < 0.28) {
+    if (Math.random() < 0.36) {
       window.scrollBy({
-        top: randomInt(-160, 180),
+        top: randomInt(-180, 220),
         behavior: "smooth"
       });
-      await delay(randomInt(600, 1300));
+      await delay(randomInt(900, 2400));
     }
   }
 }
@@ -892,7 +898,7 @@ async function browseHome(options = {}) {
 
   await waitForCondition(() => isPageReady() && document.querySelector("article"), 8000, 500);
   // 无任务时先浏览一段首页；是否点赞由后台的首页点赞间隔决定。
-  await delay(randomInt(800, 1800));
+  await delay(randomInt(1500, 4500));
   if (homeBrowseCancelled) {
     return { browsed: false, liked: false, reason: "cancelled" };
   }
@@ -911,7 +917,7 @@ async function browseHome(options = {}) {
       top: randomInt(420, Math.max(520, Math.floor(window.innerHeight * 1.1))),
       behavior: "smooth"
     });
-    await delay(randomInt(1200, 2200));
+    await delay(randomInt(2500, 5500));
     articles = getLikeableHomeArticles().filter((article) => visibleArticles().includes(article));
   }
 
@@ -919,6 +925,19 @@ async function browseHome(options = {}) {
   const like = findLikeButton(article);
   if (!article || !like || like.liked) {
     return { liked: false, reason: "no_likeable_article" };
+  }
+
+  article.scrollIntoView({ block: "center", behavior: "smooth" });
+  await delay(randomInt(2000, 8000));
+  if (homeBrowseCancelled) {
+    return { browsed: true, liked: false, reason: "cancelled" };
+  }
+  if (Math.random() < 0.3) {
+    window.scrollBy({
+      top: randomInt(-120, 140),
+      behavior: "smooth"
+    });
+    await delay(randomInt(800, 2500));
   }
 
   like.button.click();
