@@ -403,17 +403,21 @@ async function fetchImageFile(task) {
     return null;
   }
 
-  const imageUrl = /^https?:\/\//i.test(task.imageAssetPath)
-    ? task.imageAssetPath
-    : chrome.runtime.getURL(task.imageAssetPath);
-  const response = await fetch(imageUrl);
-  if (!response.ok) {
-    throw new Error(`Image load failed: ${task.imageAssetPath}`);
+  const response = await sendMessage({
+    type: "FETCH_IMAGE_DATA",
+    imageAssetPath: task.imageAssetPath
+  });
+  if (!response.ok || !response.image?.base64) {
+    throw new Error(response.error || `Image load failed: ${task.imageAssetPath}`);
   }
 
-  const blob = await response.blob();
+  const byteCharacters = atob(response.image.base64);
+  const bytes = new Uint8Array(byteCharacters.length);
+  for (let index = 0; index < byteCharacters.length; index += 1) {
+    bytes[index] = byteCharacters.charCodeAt(index);
+  }
   const fileName = task.imageFileName || task.imageAssetPath.split("/").pop() || "reply-image.jpg";
-  return new File([blob], fileName, { type: blob.type || "image/jpeg" });
+  return new File([bytes], fileName, { type: response.image.contentType || "image/jpeg" });
 }
 
 function findReplyTextbox() {
@@ -689,7 +693,7 @@ function findClosestFileInput(root) {
   return visibleMediaButtons.find((element) => element.tagName === "INPUT") || document.querySelector('input[type="file"]');
 }
 
-function pasteImageIntoTextbox(textbox, file) {
+function attachImageByPaste(textbox, file) {
   try {
     const transfer = new DataTransfer();
     transfer.items.add(file);
@@ -705,16 +709,10 @@ function pasteImageIntoTextbox(textbox, file) {
   }
 }
 
-async function attachImage(root, textbox, task) {
-  const file = await fetchImageFile(task);
-  if (!file) {
-    return false;
-  }
-
-  textbox.focus();
+function attachImageByInput(root, file) {
   const input = findClosestFileInput(root);
   if (!input) {
-    return pasteImageIntoTextbox(textbox, file);
+    return false;
   }
 
   const transfer = new DataTransfer();
@@ -730,15 +728,18 @@ async function attachImage(root, textbox, task) {
   return true;
 }
 
-async function waitForImageAttachment(root, beforeMediaCount) {
-  const deadline = Date.now() + UPLOAD_WAIT_MS;
+function hasUploadedImage(root, beforeMediaCount) {
+  const hasNewMedia = mediaMarkerCount(root) > beforeMediaCount;
+  return hasInlineReplyPreview(root) || hasImageAttachment(root) || hasNewMedia;
+}
+
+async function waitForImageAttachment(root, beforeMediaCount, timeoutMs = UPLOAD_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    const hasNewMedia = mediaMarkerCount(root) > beforeMediaCount;
-    const hasComposerMedia = hasImageAttachment(root);
     const button = findTweetSubmitButton(root);
     const buttonReady = isButtonEnabled(button);
-    if ((hasInlineReplyPreview(root) || hasComposerMedia || hasNewMedia) && buttonReady && !hasActiveUpload(root)) {
+    if (hasUploadedImage(root, beforeMediaCount) && buttonReady && !hasActiveUpload(root)) {
       return;
     }
 
@@ -746,6 +747,32 @@ async function waitForImageAttachment(root, beforeMediaCount) {
   }
 
   throw new Error("Image attachment preview did not appear");
+}
+
+async function uploadImageAndWait(root, textbox, task, beforeMediaCount) {
+  const file = await fetchImageFile(task);
+  if (!file) {
+    throw new Error("Image file not found");
+  }
+
+  textbox.focus();
+  if (attachImageByInput(root, file)) {
+    try {
+      await waitForImageAttachment(root, beforeMediaCount, 5000);
+      return;
+    } catch {
+      if (hasUploadedImage(root, beforeMediaCount)) {
+        await waitForImageAttachment(root, beforeMediaCount);
+        return;
+      }
+      // 指纹浏览器可能会忽略脚本合成的 file input 变更，未出现预览时改用粘贴兜底。
+    }
+  }
+
+  if (!attachImageByPaste(textbox, file)) {
+    throw new Error("Image upload input not found and paste fallback failed");
+  }
+  await waitForImageAttachment(root, beforeMediaCount);
 }
 
 function findTweetSubmitButton(root) {
@@ -844,12 +871,8 @@ async function publishOriginalPost(task) {
   if (task.imageAssetPath) {
     await reportState({ state: "uploading_image" });
     const beforeMediaCount = mediaMarkerCount(root);
-    const uploadStarted = await attachImage(root, textbox, task);
-    if (!uploadStarted) {
-      throw new Error("Image upload input not found and paste fallback failed");
-    }
+    await uploadImageAndWait(root, textbox, task, beforeMediaCount);
     await reportState({ state: "waiting_image" });
-    await waitForImageAttachment(root, beforeMediaCount);
     await delay(5000);
   }
 
@@ -1195,12 +1218,8 @@ async function publishReply(task) {
     if (task.imageAssetPath) {
       await reportState({ state: "uploading_image" });
       const beforeMediaCount = mediaMarkerCount(root);
-      const uploadStarted = await attachImage(root, textbox, task);
-      if (!uploadStarted) {
-        throw new Error("Image upload input not found and paste fallback failed");
-      }
+      await uploadImageAndWait(root, textbox, task, beforeMediaCount);
       await reportState({ state: "waiting_image" });
-      await waitForImageAttachment(root, beforeMediaCount);
     }
 
     const beforeStatusIds = getVisibleStatusIds();

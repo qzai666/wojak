@@ -123,7 +123,7 @@ function createTask(payload) {
     targetUrl: String(payload.targetUrl || payload.url || "").trim(),
     commentText: cleanCommentText(payload.commentText),
     originalText: cleanCommentText(payload.originalText),
-    imageAssetPath: String(payload.imageAssetPath || "").trim(),
+    imageAssetPath: normalizeLocalAssetUrl(payload.imageAssetPath),
     imageFileName: String(payload.imageFileName || "").trim(),
     state: "pending",
     copiedAt: "",
@@ -155,6 +155,21 @@ function fitTweetText(text, maxLength = 280) {
   return [...normalized].slice(0, maxLength - 1).join("").replace(/[，。；、\s]+$/u, "").trim();
 }
 
+function localAssetOrigin(request) {
+  const host = String(request.headers.host || `localhost:${PORT}`).trim();
+  const normalizedHost = host
+    .replace(/^127\.0\.0\.1(?=:|$)/, "localhost")
+    .replace(/^\[::1\](?=:|$)/, "localhost");
+  return `http://${normalizedHost}`;
+}
+
+function normalizeLocalAssetUrl(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^http:\/\/127\.0\.0\.1(?=:|\/)/, "http://localhost")
+    .replace(/^http:\/\/\[::1\](?=:|\/)/, "http://localhost");
+}
+
 function getGossipImageFileName(item) {
   return String(item?.imageFileName || path.basename(item?.imageAssetPath || "")).trim();
 }
@@ -171,7 +186,7 @@ function hasGossipImage(item) {
 function loadGossipOriginal(request, index = null) {
   const originals = JSON.parse(fs.readFileSync(GOSSIP_ORIGINAL_PATH, "utf8")).filter(hasGossipImage);
   const item = Number.isInteger(index) ? originals[index % originals.length] : pick(originals);
-  const origin = `http://${request.headers.host}`;
+  const origin = localAssetOrigin(request);
   const imageFileName = getGossipImageFileName(item);
   const title = cleanCommentText(item?.title_cn || item?.title_en || "AI 图片灵感");
   const sourceText = cleanCommentText(item?.finalContent || item?.content || "");
@@ -187,7 +202,7 @@ function loadGossipOriginal(request, index = null) {
 function loadRandomImageUrl(request) {
   const files = fs.readdirSync(IMAGE_DIR).filter((file) => /\.(jpe?g|png|gif|webp)$/i.test(file));
   const fileName = pick(files);
-  const origin = `http://${request.headers.host}`;
+  const origin = localAssetOrigin(request);
   return {
     imageAssetPath: `${origin}/image/${encodeURIComponent(fileName)}`,
     imageFileName: fileName

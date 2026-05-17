@@ -499,8 +499,46 @@ function remoteUrl(config, path) {
   return `${config.apiBaseUrl}${path}`;
 }
 
+function normalizeLocalAssetUrl(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^http:\/\/127\.0\.0\.1(?=:|\/)/, "http://localhost")
+    .replace(/^http:\/\/\[::1\](?=:|\/)/, "http://localhost");
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary);
+}
+
+async function fetchImageData(imageAssetPath) {
+  const normalizedImageAssetPath = normalizeLocalAssetUrl(imageAssetPath);
+  if (!normalizedImageAssetPath) {
+    throw new Error("Missing imageAssetPath");
+  }
+
+  const imageUrl = /^https?:\/\//i.test(normalizedImageAssetPath)
+    ? normalizedImageAssetPath
+    : chrome.runtime.getURL(normalizedImageAssetPath);
+  const response = await fetch(imageUrl);
+  if (!response.ok) {
+    throw new Error(`Image load failed: ${normalizedImageAssetPath}`);
+  }
+
+  const contentType = response.headers.get("content-type") || "image/jpeg";
+  const buffer = await response.arrayBuffer();
+  return {
+    base64: arrayBufferToBase64(buffer),
+    contentType
+  };
+}
+
 function normalizeRemoteTask(remoteTask) {
-  const imageAssetPath = remoteTask.imageAssetPath || pick(imageAssetPaths);
+  const imageAssetPath = normalizeLocalAssetUrl(remoteTask.imageAssetPath || pick(imageAssetPaths));
   if (remoteTask.type === "original" || remoteTask.type === "gossip_original") {
     return {
       type: remoteTask.type === "gossip_original" ? "gossip_original" : "original",
@@ -508,7 +546,7 @@ function normalizeRemoteTask(remoteTask) {
       queueId: String(remoteTask.queueId || DEFAULT_QUEUE_ID),
       targetUrl: HOME_URL,
       originalText: cleanCommentText(remoteTask.originalText || remoteTask.commentText || ""),
-      imageAssetPath: remoteTask.imageAssetPath || "",
+      imageAssetPath: normalizeLocalAssetUrl(remoteTask.imageAssetPath),
       imageFileName: remoteTask.imageFileName || ""
     };
   }
@@ -1032,6 +1070,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "GET_AUTO_LIKE_TASK") {
       const tasks = await getTasks();
       sendResponse({ ok: true, task: tasks[String(sender.tab?.id)] || null });
+      return;
+    }
+
+    if (message?.type === "FETCH_IMAGE_DATA") {
+      sendResponse({ ok: true, image: await fetchImageData(message.imageAssetPath || "") });
       return;
     }
 
