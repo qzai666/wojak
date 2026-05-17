@@ -23,6 +23,7 @@ let lastReloadAt = 0;
 let scriptStartedAt = Date.now();
 let isTicking = false;
 let homeBrowseCancelled = false;
+let isHomeBrowsing = false;
 
 function sendMessage(message) {
   return new Promise((resolve) => {
@@ -158,6 +159,23 @@ function delay(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+async function homeDelay(ms) {
+  const deadline = Date.now() + ms;
+  while (!homeBrowseCancelled && Date.now() < deadline) {
+    await delay(Math.min(200, deadline - Date.now()));
+  }
+}
+
+function cancelHomeBrowse() {
+  homeBrowseCancelled = true;
+  window.scrollTo(window.scrollX, window.scrollY);
+}
+
+async function waitForHomeBrowseStopped() {
+  cancelHomeBrowse();
+  await waitForCondition(() => !isHomeBrowsing, 5000, 100);
+}
+
 function randomInt(min, max) {
   return Math.floor(min + Math.random() * (max - min + 1));
 }
@@ -225,7 +243,7 @@ async function humanScrollHome() {
     if (shouldLongPause) {
       usedLongPause = true;
     }
-    await delay(shouldLongPause ? randomInt(5000, 11000) : randomInt(1200, 3600));
+    await homeDelay(shouldLongPause ? randomInt(5000, 11000) : randomInt(1200, 3600));
     if (homeBrowseCancelled) {
       return;
     }
@@ -235,7 +253,7 @@ async function humanScrollHome() {
         top: randomInt(-180, 220),
         behavior: "smooth"
       });
-      await delay(randomInt(900, 2400));
+      await homeDelay(randomInt(900, 2400));
     }
   }
 }
@@ -247,7 +265,7 @@ async function humanReadDetailPage() {
       return;
     }
 
-    await delay(randomInt(2200, 7500));
+    await homeDelay(randomInt(2200, 7500));
     if (homeBrowseCancelled) {
       return;
     }
@@ -257,7 +275,7 @@ async function humanReadDetailPage() {
       top: randomInt(180, Math.max(360, Math.floor(window.innerHeight * 0.7))) * direction,
       behavior: "smooth"
     });
-    await delay(randomInt(1200, 4200));
+    await homeDelay(randomInt(1200, 4200));
   }
 }
 
@@ -273,7 +291,7 @@ async function likeRandomVisibleReply(detailStatusId) {
   }
 
   article.scrollIntoView({ block: "center", behavior: "smooth" });
-  await delay(randomInt(2200, 9000));
+  await homeDelay(randomInt(2200, 9000));
   if (homeBrowseCancelled) {
     return false;
   }
@@ -283,7 +301,7 @@ async function likeRandomVisibleReply(detailStatusId) {
       top: randomInt(-120, 160),
       behavior: "smooth"
     });
-    await delay(randomInt(1000, 2800));
+    await homeDelay(randomInt(1000, 2800));
   }
 
   like.button.click();
@@ -301,7 +319,7 @@ async function browseRandomPostDetail(shouldLike) {
 
   const detailStatusId = statusIdFromUrl(item.link.href);
   item.article.scrollIntoView({ block: "center", behavior: "smooth" });
-  await delay(randomInt(2500, 8500));
+  await homeDelay(randomInt(2500, 8500));
   if (homeBrowseCancelled) {
     return { opened: false, liked: false, reason: "cancelled" };
   }
@@ -313,17 +331,17 @@ async function browseRandomPostDetail(shouldLike) {
   }
 
   await waitForCondition(() => document.querySelector("article"), 8000, 500);
-  await delay(randomInt(2500, 7000));
+  await homeDelay(randomInt(2500, 7000));
   await humanReadDetailPage();
 
   let liked = false;
   if (!homeBrowseCancelled && shouldLike && Math.random() < 0.65) {
     liked = await likeRandomVisibleReply(detailStatusId);
-    await delay(randomInt(1800, 5200));
+    await homeDelay(randomInt(1800, 5200));
   }
 
   await returnHomeFromIdleBrowse();
-  await delay(randomInt(1600, 4200));
+  await homeDelay(randomInt(1600, 4200));
   return { opened: true, liked, reason: liked ? "detail_reply_liked" : "detail_read" };
 }
 
@@ -714,7 +732,6 @@ async function attachImage(root, textbox, task) {
 
 async function waitForImageAttachment(root, beforeMediaCount) {
   const deadline = Date.now() + UPLOAD_WAIT_MS;
-  const relaxedDeadline = Date.now() + 3000;
 
   while (Date.now() < deadline) {
     const hasNewMedia = mediaMarkerCount(root) > beforeMediaCount;
@@ -722,10 +739,6 @@ async function waitForImageAttachment(root, beforeMediaCount) {
     const button = findTweetSubmitButton(root);
     const buttonReady = isButtonEnabled(button);
     if ((hasInlineReplyPreview(root) || hasComposerMedia || hasNewMedia) && buttonReady && !hasActiveUpload(root)) {
-      return;
-    }
-
-    if (Date.now() >= relaxedDeadline && buttonReady && !hasActiveUpload(root)) {
       return;
     }
 
@@ -774,6 +787,11 @@ async function waitForOriginalComposer() {
     location.assign("https://x.com/home");
     await waitForCondition(() => isOriginalComposerPage() && isPageReady(), 10000, 500);
   }
+  if (location.pathname.startsWith("/home")) {
+    // 首页发帖框只在顶部稳定可见，发布前先回到顶部，避免复用滚动中的信息流位置。
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    await delay(300);
+  }
   const textbox = await waitForCondition(findHomePostTextbox, 12000, 300);
   if (!textbox) {
     throw new Error("Original post textbox not found");
@@ -810,6 +828,7 @@ function findOriginalPostUrl(text, beforeStatusIds) {
 }
 
 async function publishOriginalPost(task) {
+  await waitForHomeBrowseStopped();
   const originalText = cleanCommentText(task.originalText);
   if (!originalText) {
     throw new Error("Original text is empty");
@@ -831,6 +850,7 @@ async function publishOriginalPost(task) {
     }
     await reportState({ state: "waiting_image" });
     await waitForImageAttachment(root, beforeMediaCount);
+    await delay(5000);
   }
 
   const beforeStatusIds = getVisibleStatusIds();
@@ -1009,73 +1029,82 @@ async function ensureLiked(article) {
 }
 
 async function browseHome(options = {}) {
+  if (isHomeBrowsing) {
+    return { browsed: false, liked: false, reason: "already_browsing" };
+  }
+
+  isHomeBrowsing = true;
   homeBrowseCancelled = false;
-  const shouldLike = options.shouldLike !== false;
-  if (isStandaloneComposePage()) {
-    return { browsed: false, liked: false, reason: "compose_page" };
-  }
+  try {
+    const shouldLike = options.shouldLike !== false;
+    if (isStandaloneComposePage()) {
+      return { browsed: false, liked: false, reason: "compose_page" };
+    }
 
-  if (!location.pathname.startsWith("/home")) {
-    location.assign("https://x.com/home");
-    await waitForCondition(() => location.pathname.startsWith("/home") && isPageReady(), 8000, 500);
-  }
+    if (!location.pathname.startsWith("/home")) {
+      location.assign("https://x.com/home");
+      await waitForCondition(() => location.pathname.startsWith("/home") && isPageReady(), 8000, 500);
+    }
 
-  await waitForCondition(() => isPageReady() && document.querySelector("article"), 8000, 500);
-  // 无任务时先浏览一段首页；是否点赞由后台的首页点赞间隔决定。
-  await delay(randomInt(1500, 4500));
-  if (homeBrowseCancelled) {
-    return { browsed: false, liked: false, reason: "cancelled" };
-  }
-  await humanScrollHome();
-  if (homeBrowseCancelled) {
-    return { browsed: true, liked: false, reason: "cancelled" };
-  }
-  if (Math.random() < 0.45) {
-    const detailResult = await browseRandomPostDetail(shouldLike);
+    await waitForCondition(() => isPageReady() && document.querySelector("article"), 8000, 500);
+    // 无任务时先浏览一段首页；是否点赞由后台的首页点赞间隔决定。
+    await homeDelay(randomInt(1500, 4500));
     if (homeBrowseCancelled) {
-      return { browsed: true, liked: detailResult.liked, reason: "cancelled" };
+      return { browsed: false, liked: false, reason: "cancelled" };
     }
-    if (detailResult.liked || Math.random() < 0.5) {
-      return { browsed: true, liked: detailResult.liked, reason: detailResult.reason };
+    await humanScrollHome();
+    if (homeBrowseCancelled) {
+      return { browsed: true, liked: false, reason: "cancelled" };
     }
-  }
-  if (!shouldLike) {
-    return { browsed: true, liked: false, reason: "scroll_only" };
-  }
+    if (Math.random() < 0.45) {
+      const detailResult = await browseRandomPostDetail(shouldLike);
+      if (homeBrowseCancelled) {
+        return { browsed: true, liked: detailResult.liked, reason: "cancelled" };
+      }
+      if (detailResult.liked || Math.random() < 0.5) {
+        return { browsed: true, liked: detailResult.liked, reason: detailResult.reason };
+      }
+    }
+    if (!shouldLike) {
+      return { browsed: true, liked: false, reason: "scroll_only" };
+    }
 
-  let articles = getLikeableHomeArticles().filter((article) => visibleArticles().includes(article));
+    let articles = getLikeableHomeArticles().filter((article) => visibleArticles().includes(article));
 
-  if (!articles.length) {
-    window.scrollBy({
-      top: randomInt(420, Math.max(520, Math.floor(window.innerHeight * 1.1))),
-      behavior: "smooth"
-    });
-    await delay(randomInt(2500, 5500));
-    articles = getLikeableHomeArticles().filter((article) => visibleArticles().includes(article));
-  }
+    if (!articles.length) {
+      window.scrollBy({
+        top: randomInt(420, Math.max(520, Math.floor(window.innerHeight * 1.1))),
+        behavior: "smooth"
+      });
+      await homeDelay(randomInt(2500, 5500));
+      articles = getLikeableHomeArticles().filter((article) => visibleArticles().includes(article));
+    }
 
-  const article = articles[Math.floor(Math.random() * articles.length)];
-  const like = findLikeButton(article);
-  if (!article || !like || like.liked) {
-    return { liked: false, reason: "no_likeable_article" };
-  }
+    const article = articles[Math.floor(Math.random() * articles.length)];
+    const like = findLikeButton(article);
+    if (!article || !like || like.liked) {
+      return { liked: false, reason: "no_likeable_article" };
+    }
 
-  article.scrollIntoView({ block: "center", behavior: "smooth" });
-  await delay(randomInt(2000, 8000));
-  if (homeBrowseCancelled) {
-    return { browsed: true, liked: false, reason: "cancelled" };
-  }
-  if (Math.random() < 0.3) {
-    window.scrollBy({
-      top: randomInt(-120, 140),
-      behavior: "smooth"
-    });
-    await delay(randomInt(800, 2500));
-  }
+    article.scrollIntoView({ block: "center", behavior: "smooth" });
+    await homeDelay(randomInt(2000, 8000));
+    if (homeBrowseCancelled) {
+      return { browsed: true, liked: false, reason: "cancelled" };
+    }
+    if (Math.random() < 0.3) {
+      window.scrollBy({
+        top: randomInt(-120, 140),
+        behavior: "smooth"
+      });
+      await homeDelay(randomInt(800, 2500));
+    }
 
-  like.button.click();
-  const liked = await waitForCondition(() => findLikeButton(article)?.liked, 5000, 250);
-  return { browsed: true, liked: Boolean(liked), reason: liked ? "liked" : "like_timeout" };
+    like.button.click();
+    const liked = await waitForCondition(() => findLikeButton(article)?.liked, 5000, 250);
+    return { browsed: true, liked: Boolean(liked), reason: liked ? "liked" : "like_timeout" };
+  } finally {
+    isHomeBrowsing = false;
+  }
 }
 
 function findRepostConfirmButton() {
@@ -1338,13 +1367,14 @@ async function startAutoLike(task) {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "STOP_HOME_BROWSE") {
-    homeBrowseCancelled = true;
-    sendResponse({ ok: true });
+    waitForHomeBrowseStopped()
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
   if (message?.type === "START_AUTO_LIKE_TASK") {
-    startAutoLike(message.task).catch((error) => {
+    waitForHomeBrowseStopped().then(() => startAutoLike(message.task)).catch((error) => {
       stopTask({ state: "error", error: error.message, completedAt: Date.now() });
     });
     sendResponse({ ok: true });
